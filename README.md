@@ -15,7 +15,7 @@ There are three options for installing devlab:
 
 1. Clone this repository and execute `./installer.py`
 1. Run a one-liner that will extract the installer from the devlab package and execute it:
-   * `curl -s https://github.com/evernym/devlab/releases/download/v1.6.0/devlab_1.6.0_all.tgz | tar xOvz devlab/installer.py | python`
+   * `curl -Ls https://github.com/evernym/devlab/releases/download/v1.6.0/devlab_1.6.0_all.tgz | tar xOvz devlab/installer.py | python`
 1. Clone this repository and link it directly to someplace in your path
    * NOTE - This will disable the 'update' feature in devlab and the installer. Meaning you will be using `git` to manage your own updates, which is useful if you are doing development work on `devlab`
 
