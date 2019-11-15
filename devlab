@@ -1,0 +1,2858 @@
+#!/usr/bin/env python
+# vim: set syntax=python et ts=4 sw=4 sts=4:
+"""
+Main script for managing the devlab environment stack
+"""
+import argparse
+import fcntl
+import json
+import logging
+import os
+import platform
+import re
+import signal
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from copy import deepcopy
+
+try:
+    #Python2
+    text_input = raw_input #pylint: disable=invalid-name
+    from pipes import quote
+except NameError:
+    #Python3
+    text_input = input #pylint: disable=invalid-name
+    quote = shlex.quote #pylint: disable=invalid-name
+
+##- Variables -##
+ARGS = None
+CONFIG_FILE_NAMES = ('DevlabConfig.json', 'Devlabconfig.json')
+CONFIG_DEF = {
+    'domain': 'devlab.lab',
+    'wizard_enabled': True,
+    'components': {},
+    'network': {
+        'name': None
+    },
+    'reprovisionable_components': [],
+    'runtime_images': {}
+}
+DOCKER = None
+PARSER = None
+IMAGES = {
+    'devlab_base': {
+        'tag': 'latest',
+        'docker_file': 'docker/base.Dockerfile',
+        'build_opts': [],
+        'ordinal': {
+            'group': 0,
+            'number': 1
+        }
+    },
+    'devlab_helper': {
+        'tag': 'latest',
+        'docker_file': 'docker/helper.Dockerfile',
+        'build_opts': [],
+        'ordinal': {
+            'group': 1,
+            'number': 1
+        }
+    }
+}
+LOGGER = None
+LOGGING_LEVELS = {
+    'debug': logging.DEBUG,
+    'info': logging.INFO,
+    'warning': logging.WARNING,
+    'error': logging.ERROR,
+    'critical': logging.CRITICAL,
+    'notset': logging.NOTSET
+}
+DEVLAB_ROOT = os.path.dirname(os.path.realpath(__file__))
+PROJ_ROOT = None
+__VERSION__ = 'master'
+
+##- Classes -##
+class DevlabCommandError(Exception):
+    """
+    Exception class for Devlab Command class errors
+    """
+    pass
+
+class DockerHelper(object):
+    """
+    This is a helper for running docker commands
+    """
+    def __init__(self, filter_label=None, labels=None, common_domain=None, skip_checks=False):
+        """
+        Initialize the DockerHelper Object
+
+        Args:
+            filter_label: String of a label to filter on when querying docker
+            labels: List of labels to apply to all objects created by
+                DockerHelper
+            common_domain: When running containers, use this domain as part of
+                the container name.
+        """
+        self.log = logging.getLogger('DockerHelper')
+        self.docker_bin_paths = (
+            '/usr/bin/docker',
+            '/usr/local/bin/docker',
+            '/usr/sbin/docker',
+            '/bin/docker'
+        )
+        self.filter_label = filter_label
+        self.common_domain = common_domain
+        self.opt_domainname = False
+        if not skip_checks:
+            self._pre_check()
+        self.labels = labels
+    def _pre_check(self):
+        """
+        Checks to make sure the script is being run as the root user, or a
+        user that is able to talk to docker
+
+        Returns None, but if access check fails, then exit
+        """
+        dchk = Command(self.docker_bin_paths, ['ps'], logger=self.log).run()
+        if dchk[0] != 0:
+            if os.geteuid() != 0:
+                self.log.error("Cannot talk to docker, maybe try again as the root user?")
+            else:
+                self.log.error("Cannot talk to docker, maybe it isn't running?")
+            sys.exit(1)
+        dchk = Command(self.docker_bin_paths, ['run', '--help'], logger=self.log, split=False).run()
+        if '--domainname' in dchk[1]:
+            self.opt_domainname = True
+    def build_image(self, name, tag, context, docker_file, apply_filter_label=True, build_opts=None, logger=None, network=None, **kwargs):
+        """
+        Build a docker image.
+
+        Args:
+            name: str, The name of the image
+            tag: str or list, Tag(s) to attach to the image
+            context: str, Path to the build context to use
+            docker_file: str, Path to the Dockerfile to build from
+            apply_filter_label: bool, whether to add self.filter as a label to
+                the created image
+            build_opts: list/tuple, indicating additional options to pass to
+                'docker build' (OPTIONAL)
+            logger: Logger object to send logs to instead of self.log (OPTIONAL)
+            network: str, docker network to attach (OPTIONAL)
+            kwargs: dict, Additional arguments to pass to the Command Object
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        opts = [
+            'build',
+            '--force-rm'
+        ]
+        cmd_logger = self.log
+        if logger:
+            cmd_logger = logger
+        if network:
+            opts.append("--network={}".format(network))
+        if build_opts:
+            opts += build_opts
+        if self.labels:
+            for label in self.labels:
+                opts += [
+                    '--label',
+                    label
+                ]
+        if self.filter_label and apply_filter_label:
+            opts.append('--label={}'.format(self.filter_label))
+        if isinstance(tag, list):
+            for btag in tag:
+                opts += ['-t', '{}:{}'.format(name, btag)]
+        else:
+            opts += ['-t', '{}:{}'.format(name, tag)]
+        opts += [
+            '-f',
+            '-',
+            context
+        ]
+        if os.path.isfile(docker_file):
+            with open(docker_file) as stdin:
+                cmd_ret = Command(
+                    self.docker_bin_paths,
+                    opts,
+                    stdin=stdin,
+                    logger=cmd_logger,
+                    **kwargs
+                ).run()
+                return cmd_ret
+        else:
+            self.log.error("Cannot find docker_file: %s", docker_file)
+        return (1, ['Cannot find docker_file: {}'.format(docker_file)])
+    def create_network(self, name, cidr=None, driver='bridge', device_name=None):
+        """
+        Create a docker network
+
+        Args:
+            name: str, Name of the network to create
+            cidr: str, CIDR Notation for the network
+        """
+        opts = [
+            'network',
+            'create',
+            '--subnet',
+            cidr,
+            '--driver',
+            driver
+        ]
+        if self.labels:
+            for label in self.labels:
+                opts += [
+                    '--label',
+                    label
+                ]
+        if self.filter_label:
+            opts.append('--label={}'.format(self.filter_label))
+        if device_name:
+            opts.append('--opt')
+            opts.append('com.docker.network.bridge.name={}'.format(device_name))
+        opts.append(name)
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=self.log
+        ).run()
+        return cmd_ret
+    def exec_cmd(self, name, cmd, background=False, interactive=True, ignore_nonzero_rc=False, logger=None, exec_opts=None, **kwargs):
+        """
+        Run a command inside of another container
+
+        Args:
+            name: str, The name of the container where the command should be run
+            cmd: str, Command to run inside the container.
+            background: Run the container in the background. (OPTIONAL)
+            interactive: bool, whether or not the docker command could require
+                console input etc... (OPTIONAL)
+            ignore_nonzero_rc: bool indicating whether errors should create
+                logs. (OPTIONAL)
+            logger: Logger object to send logs to instead of self.log (OPTIONAL)
+            exec_opts: list/tuple, indicating additional options to pass to
+                'docker exec'. (OPTIONAL)
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        ignored_opts = kwargs
+        opts = [
+            'exec',
+        ]
+        cmd_logger = self.log
+        if exec_opts:
+            opts += exec_opts
+        if background:
+            opts.append("--detach")
+        if interactive:
+            opts.append("-it")
+        if logger:
+            cmd_logger = logger
+        opts += [
+            name
+        ]
+        opts += shlex.split(cmd)
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=cmd_logger,
+            interactive=interactive,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            **kwargs
+        ).run()
+        return cmd_ret
+    def get_containers(self, return_all=False):
+        """
+        List of containers that have been created
+
+        Args:
+            return_all: bool, whether or not to return all containers
+                regardless of the filter set.
+
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of dicts from docker if successful,
+                    else a list of strings from the output of the command
+        """
+        opts = [
+            'ps',
+            '-a'
+        ]
+        if self.filter_label and not return_all:
+            opts.append('--filter')
+            opts.append('label={}'.format(self.filter_label))
+        opts.append('--format')
+        opts.append('{{.ID}},{{.Status}},{{.Names}}')
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=self.log
+        ).run()
+        containers = []
+        if cmd_ret[0] == 0:
+            for cres in cmd_ret[1]:
+                container_id, status, name = cres.split(',')
+                containers.append({
+                    'id': container_id,
+                    'name': name,
+                    'status': status
+                })
+            return (cmd_ret[0], containers)
+        return cmd_ret
+    def get_images(self, return_all=False):
+        """
+        List of images that docker has
+
+        Args:
+            return_all: bool, whether or not to return all images regardless of
+                the filter set.
+
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        opts = [
+            'images'
+        ]
+        if self.filter_label and not return_all:
+            opts.append('--filter')
+            opts.append('label={}'.format(self.filter_label))
+        opts.append('--format')
+        opts.append('{{.Repository}}:{{.Tag}}')
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=self.log
+        ).run()
+        return cmd_ret
+    def get_networks(self, return_all=False):
+        """
+        List of networks that docker has
+
+        Args:
+            return_all: bool, whether or not to return all networks regardless
+                of the filter set.
+
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of dicts from docker if successful,
+                    else a list of strings from the output of the command
+        """
+        opts = [
+            'network',
+            'list'
+        ]
+        if self.filter_label and not return_all:
+            opts.append('--filter')
+            opts.append('label={}'.format(self.filter_label))
+        opts.append('--format')
+        opts.append('{{.ID}},{{.Name}},{{.Driver}},{{.Scope}}')
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=self.log
+        ).run()
+        networks = []
+        if cmd_ret[0] == 0:
+            for nres in cmd_ret[1]:
+                network_id, name, driver, scope = nres.split(',')
+                networks.append({
+                    'id': network_id,
+                    'name': name,
+                    'driver': driver,
+                    'scope': scope
+                })
+            return (cmd_ret[0], networks)
+        return cmd_ret
+    def inspect_container(self, container):
+        """
+        Grabs the inspection data (docker inspect) for a container
+
+        Args:
+            container: String of the container you want to inspect
+
+        Return dict
+        """
+        ret = {}
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            [
+                'inspect',
+                container
+            ],
+            split=False,
+            logger=self.log
+        ).run()
+        if cmd_ret[0] == 0:
+            ret = json.loads(cmd_ret[1])
+        return ret
+    def prune_images(self, prune_all=False):
+        """
+        Prune images from docker
+
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        opts = [
+            'image',
+            'prune'
+        ]
+        if self.filter_label and not prune_all:
+            opts.append('--filter')
+            opts.append('label={}'.format(self.filter_label))
+        opts.append('-f')
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=self.log
+        ).run()
+        return cmd_ret
+    def pull_image(self, image, **kwargs):
+        """
+        Pull an image from docker repos
+
+        Args:
+            image: String of the image you want to pull. ie ubuntu:16.04 etc...
+            kwargs: dict, Additional arguments to pass to the Command object
+
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        opts = [
+            'image',
+            'pull',
+        ]
+        opts.append(image)
+        if 'logger' not in kwargs:
+            kwargs['logger'] = self.log
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            **kwargs
+        ).run()
+        return cmd_ret
+    def rm_container(self, name, force=True):
+        """
+        Remove a container
+
+        Args:
+            name: str, Name of the image to remove
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        opts = [
+            'rm'
+        ]
+        if force:
+            opts.append('-f')
+        opts.append(name)
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=self.log
+        ).run()
+        return cmd_ret
+    def rm_image(self, name):
+        """
+        Remove an image
+
+        Args:
+            name: str, Name of the image to remove
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            [
+                'rmi',
+                '-f',
+                name
+            ],
+            logger=self.log
+        ).run()
+        return cmd_ret
+    def run_container(self, image, name, network=None, ports=None, background=True, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, run_opts=None, **kwargs): #pylint: disable=too-many-arguments
+        """
+        Run a docker_container
+
+        Args:
+            image: str, The name of the image to use for the container
+            name: str, The name of the container (this also sets the hostname)
+            network: str, docker network to attach
+            cmd: str, Command to run inside the container. (OPTIONAL)
+            ports: list/tuple, of ports to publish to the host. (OPTIONAL)
+            background: Run the container in the background. (OPTIONAL)
+            interactive: bool, whether or not the docker command could require
+                console input etc... (OPTIONAL)
+            ignore_nonzero_rc: bool indicating whether errors should create
+                logs. (OPTIONAL)
+            logger: Logger object to send logs to instead of self.log (OPTIONAL)
+            mounts: list/tuple, Of volume mounts to pass. (OPTIONAL)
+            run_opts: list/tuple, indicating additional options to pass to
+                'docker run'. (OPTIONAL)
+            systemd_support: bool, whether to enable opts to let systemd work
+                inside the container. (OPTIONAL)
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        ignored_opts = kwargs
+        opts = [
+            'run',
+        ]
+        cmd_logger = self.log
+        if run_opts:
+            opts += run_opts
+        if self.labels:
+            for label in self.labels:
+                opts += [
+                    '--label',
+                    label
+                ]
+        if self.filter_label:
+            opts.append('--label={}'.format(self.filter_label))
+        if background:
+            opts.append("--detach")
+        if network:
+            opts.append("--network={}".format(network))
+        if systemd_support:
+            opts += [
+                '--tmpfs=/run',
+                '--tmpfs=/run/lock',
+                '--tmpfs=/tmp',
+                '--volume=/sys/fs/cgroup:/sys/fs/cgroup:ro'
+            ]
+        if mounts:
+            for mount in mounts:
+                opts.append('--volume={}'.format(mount))
+        if ports:
+            for port in ports:
+                opts.append('--publish={}'.format(port))
+        if interactive:
+            opts.append('-it')
+        if logger:
+            cmd_logger = logger
+        opts += [
+            '--name',
+            name
+        ]
+        if self.common_domain:
+            if self.opt_domainname:
+                opts += [
+                    '--hostname',
+                    name,
+                    '--domainname',
+                    self.common_domain
+                ]
+            else:
+                opts += [
+                    '--hostname',
+                    '{}.{}'.format(name, self.common_domain)
+                ]
+        else:
+            opts += [
+                '--hostname',
+                name
+            ]
+        opts.append(image)
+        if cmd:
+            opts += shlex.split(cmd)
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            opts,
+            logger=cmd_logger,
+            interactive=interactive,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            **kwargs
+        ).run()
+        return cmd_ret
+    def start_container(self, name, ignore_nonzero_rc=False):
+        """
+        Start an already existing container
+
+        Args:
+            name: str, Name of the container to start
+            ignore_nonzero_rc: bool, whether or not we should care if the rc not 0
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            [
+                'start',
+                name
+            ],
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            logger=self.log
+        ).run()
+        return cmd_ret
+    def stop_container(self, name):
+        """
+        Stop an already existing container
+
+        Args:
+            name: str, Name of the container to stop
+        Returns:
+            tuple where:
+                First Element is the return code from docker
+                Second Element is a list of strings of the output from docker
+        """
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            [
+                'stop',
+                name
+            ],
+            logger=self.log
+        ).run()
+        return cmd_ret
+
+class Command(object):
+    """
+    Run a command, and return either stdout as a string or an array of strings
+    split by line
+
+    Args:
+        path: str, or list for the location of the process to run
+        args: list
+        ignore_nonzero_rc: bool, whether errors should create logs
+        interactive: bool, whether the process should be "interactive"
+        split: bool
+        suppress_error_out: bool
+        stdin: FileHandle, of stdin to send to the process
+        timeout: integer, in minutes before the process is aborted <=0 mean no
+            timeout. Default=0
+        log_output: bool, whether to send the output of the command to the logger
+        logger: Logger object to use for messages
+    """
+    def __init__(self, path, args=None, ignore_nonzero_rc=False, interactive=False, split=True, suppress_error_out=False, stdin=None, timeout=0, log_output=False, logger=None, **kwargs):
+        """
+        Initialize the command object
+        """
+        ignored_opts = kwargs
+        if not args:
+            self.args = []
+        else:
+            self.args = list(filter(lambda x: x != None, args))
+        self.ignore_nonzero_rc = ignore_nonzero_rc
+        self.interactive = interactive
+        self.path = path
+        self.real_path = None
+        if logger:
+            self.log = logger
+        else:
+            self.log = logging.getLogger('Command')
+        self.log_output = log_output
+        self.split = split
+        self.suppress_error_out = suppress_error_out
+        self.stdin = stdin
+        self.timeout = timeout
+        self.stdout = []
+        self.stderr = []
+        self.ctime = time.time()
+        self.proc = None
+        if log_output and interactive:
+            raise DevlabCommandError("ERROR: Setting both 'interactive' and 'log_output' to True won't work")
+    def _precheck(self):
+        """
+        Does some preliminary checks to ensure that executing the script will
+        be good, before trying
+
+        Return:
+            tuple where:
+                First element is an integer... -1 mean failed. 0 means success
+                Second element is a message, or the path that was found
+        """
+        found_path = self.path
+        if isinstance(self.path, (list, tuple, set)):
+            in_path = False
+            for found_path in self.path:
+                if os.access(found_path, os.X_OK):
+                    in_path = True
+                    break
+            if not in_path:
+                if not self.suppress_error_out:
+                    self.log.error("Can't find executable here: %s", self.path)
+                    return (-1, "Error! Can't find executable here: {}".format(self.path))
+        else:
+            if not os.access(self.path, os.X_OK):
+                if not self.suppress_error_out:
+                    self.log.error("Can't find executable here: %s", self.path)
+                return (-1, "Error! Can't find executable here: {}".format(self.path))
+        return (0, found_path)
+    def _sanitize_string(self, string_to_sanitize): #pylint: disable=no-self-use
+        """
+        Take a string that needs to be sanitized, and do the following things to it:
+            1) Decode it to ascii, ignoring anything that isn't ascii
+            2) If there are escape sequences, add an ending escape sequence to the
+            3) If there is no terminal, then strip out any escape sequences
+        Args:
+            string_to_sanitize: The string to sanitize
+        Returns
+            str
+        """
+        #self.log.debug("Got original string: '{}'".format("%r" % string_to_sanitize))
+        if not string_to_sanitize:
+            return string_to_sanitize
+        sanitized = string_to_sanitize.decode('ascii', 'ignore')
+        sanitized = sanitized.strip()
+        if ISATTY:
+            if '\033[' in sanitized:
+                #Append ending escape sequence to the string
+                sanitized += '\033[0m'
+        else:
+            #Remove ending escape from string
+            ansi_escape = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
+            sanitized = ansi_escape.sub('', sanitized)
+        #self.log.debug("Converted to: '{}'".format("%r" % sanitized))
+        return sanitized
+    def _process_output(self, max_lines=100, flush=False):
+        line_count = 0
+        cur_check = 0
+        max_checks = 100
+        if flush:
+            for pipe in (self.proc.stdout, self.proc.stderr):
+                try:
+                    pipe.flush()
+                except AttributeError:
+                    pass
+        while cur_check <= max_checks or flush:
+            stdout_empty = False
+            stderr_empty = False
+            try:
+                stdout_line = None
+                stderr_line = None
+                if self.proc.stdout is not None:
+                    try:
+                        stdout_line = self._sanitize_string(self.proc.stdout.readline())
+                    except IOError:
+                        stdout_line = None
+                if self.proc.stderr is not None:
+                    try:
+                        stderr_line = self._sanitize_string(self.proc.stderr.readline())
+                    except IOError:
+                        stderr_line = None
+                if stdout_line:
+                    if self.log_output:
+                        self.log.info(stdout_line)
+                    self.stdout.append(stdout_line)
+                    line_count += 1
+                else:
+                    stdout_empty = True
+                if stderr_line:
+                    if self.log_output:
+                        self.log.warning(stderr_line)
+                    self.stderr.append(stderr_line)
+                    line_count += 1
+                else:
+                    stderr_empty = True
+                if not flush:
+                    #If both pipes are empty, then return/break out.
+                    if stdout_empty and stderr_empty:
+                        break
+                    #Even if there is still data in the pipes, return back control if max_lines is reached
+                    if line_count >= max_lines:
+                        break
+                else:
+                    #No new lines from either pipe, and process has ended. Flush complete
+                    if (stdout_empty and stderr_empty) and self.proc.poll() is not None:
+                        #Get any non-newline separate content that is left
+                        if self.proc.stdout:
+                            stdout_dangle = self._sanitize_string(self.proc.stdout.read())
+                            if stdout_dangle:
+                                if self.log_output:
+                                    self.log.info(stdout_dangle)
+                                self.stdout.append(stdout_dangle)
+                        if self.proc.stderr:
+                            stderr_dangle = self._sanitize_string(self.proc.stderr.read())
+                            if stderr_dangle:
+                                if self.log_output:
+                                    self.log.error(stderr_dangle)
+                                self.stderr.append(stderr_dangle)
+                        break
+            except OSError:
+                pass
+            cur_check += 1
+    def _wait_for_proc(self):
+        """
+        Wait for the running process to finish running and process any output
+        that the process has generated while waiting. This is also responsible
+        for watching the process for any timeouts
+        """
+        #Check every .1 seconds if the process is hung or not.
+        #hung means it waited longer than self.timeout
+        self.log.debug("Watching process (pid=%s) for completion or if hung", self.proc.pid)
+        while self.proc.poll() is None:
+            cur_time = time.time()
+            #Write any error messages from the process using our logger
+            self._process_output()
+            #If our process has been running longer than self.timeout
+            #then we should see if it is hung or something
+            if self.timeout > 0:
+                if cur_time - self.ctime > self.timeout * 60:
+                    self.log.warning("Command: '%s'(pid=%s): appears to be hung, attempting to stop and/or kill it", ' '.join([self.real_path] + self.args), self.proc.pid)
+                    self.proc.terminate()
+                    wait_count = 0
+                    while self.proc.poll() is None:
+                        if wait_count >= 20:
+                            self.log.warning("Command: '%s'(pid=%s): Didn't die, forcefully killing it", ' '.join([self.real_path] + self.args), self.proc.pid)
+                            self.proc.kill()
+                            self.proc.wait()
+                            self._process_output(flush=True)
+                            self.proc.communicate()
+                            break
+                        time.sleep(1)
+                        wait_count += 1
+            time.sleep(0.01)
+        #Write any remaining log messages in the pipe
+        self._process_output(flush=True)
+        #This is needed so that the process can clean up its stdout/err pipes
+        self.proc.communicate()
+    def die(self, graceful=True):
+        """
+        Make any running process go away
+
+        Args:
+            graceful: bool, whether to try and gracefully kill process (INT),
+                to send a SIGKILL signal
+        """
+        if self.proc:
+            if graceful:
+                self.proc.send_signal(signal.SIGINT)
+                wait_count = 0
+                while self.proc.poll() is None:
+                    if wait_count >= 20:
+                        self.proc.kill()
+                        self.proc.wait()
+                        break
+                    time.sleep(1)
+                    wait_count += 1
+            else:
+                self.proc.kill()
+                self.proc.wait()
+    def run(self):
+        """
+        Execute the command
+
+        Returns:
+            tuple where:
+                First Element is the return code of the command
+                Second Element is either a list of strings OR a str (if split==false)
+        """
+        precheck_res = self._precheck()
+        if precheck_res[0] < 0:
+            return precheck_res
+        self.real_path = precheck_res[1]
+        subprocess_args = {
+            'shell': False
+        }
+        if not self.interactive:
+            subprocess_args['stdout'] = subprocess.PIPE
+            subprocess_args['stderr'] = subprocess.PIPE
+        if self.stdin:
+            subprocess_args['stdin'] = self.stdin
+        self.log.debug("Running command: '%s'", ' '.join([self.real_path] + self.args))
+        self.ctime = time.time()
+        self.proc = subprocess.Popen([self.real_path] + self.args, **subprocess_args)
+        for strm in (self.proc.stdout, self.proc.stderr):
+            if strm is not None:
+                fno = strm.fileno()
+                fl_nb = fcntl.fcntl(fno, fcntl.F_GETFL)
+                fcntl.fcntl(fno, fcntl.F_SETFL, fl_nb | os.O_NONBLOCK)
+        self._wait_for_proc()
+        if self.proc.returncode > 0:
+            if not self.suppress_error_out:
+                if not self.ignore_nonzero_rc:
+                    self.log.error("Command did not exit with successful status code (%s): '%s %s'", self.proc.returncode, self.real_path, ' '.join(self.args))
+                if self.stdout and not self.log_output:
+                    for line in self.stdout:
+                        self.log.error(line)
+                if self.stderr and not self.log_output:
+                    for line in self.stderr:
+                        self.log.error(line)
+            out = self.stderr
+            if not self.stderr:
+                if self.stdout:
+                    out = self.stdout
+                else:
+                    out = ''
+        else:
+            if self.stdout:
+                out = self.stdout
+            else:
+                out = ''
+        if not self.split:
+            out = '\n'.join(out)
+        return (self.proc.returncode, out)
+
+##- Functions -##
+def action_build(images='*', clean=False, no_cache=False, pull=False, **kwargs):
+    """
+    This is responsible for building all the docker images etc...
+
+    Args:
+        images: list of images to build, this can also be the string '*'
+        clean: boolean indicating whether all images should be removed and
+            rebuilt. Default=False
+        no_cache: boolean indicating whether or images should re-use cache when
+            building. Default=False
+        pull: boolean indicating whether a --pull should happen to update base
+            images. Default=False
+    Returns:
+        None
+    """
+    abort = False
+    ignored_args = kwargs
+    base_images_to_build = []
+    runtime_images_dict = None
+    runtime_images_to_build = []
+    log = logging.getLogger("Build")
+    log_output = False
+    log.debug("Will build with clean set to: %s", clean)
+    log.debug("Will build with no_cache set to: %s", no_cache)
+    log.debug("Will build with pull set to: %s", pull)
+    config = get_config()
+    base_images_dict = dict(IMAGES)
+    images_dict = dict(base_images_dict)
+    docker_helper_base = DockerHelper(
+        labels=[
+            'com.lab.type=devlab'
+        ],
+        common_domain=config['domain']
+    )
+    docker_helper = DOCKER
+    try:
+        runtime_images_dict = dict(config['runtime_images'])
+        images_dict.update(runtime_images_dict)
+    except KeyError:
+        log.info("No runtime_images defined. Skipping...")
+    images_to_build = images
+    if log.getEffectiveLevel() <= logging.DEBUG:
+        log_output = True
+    if images == '*':
+        needed_images = get_needed_images()
+        base_images_to_build = needed_images['base_images']['missing'] + needed_images['base_images']['exists']
+        runtime_images_to_build = needed_images['runtime_images']['missing'] + needed_images['runtime_images']['exists']
+    else:
+        for img in images:
+            if img in base_images_dict:
+                base_images_to_build.append(img)
+            else:
+                runtime_images_to_build.append(img)
+    try:
+        images_to_build = get_ordinal_sorting(base_images_to_build, base_images_dict)
+        images_to_build += get_ordinal_sorting(runtime_images_to_build, runtime_images_dict)
+    except RuntimeError:
+        log.error("Image(s): '%s' not found. Maybe one of them is an image that is built with the --runtime-images argument??", ','.join(images_to_build))
+        sys.exit(1)
+    #See if we need to create a network
+    if config['network']['name']:
+        network_status = docker_obj_status(config['network']['name'], 'network', DOCKER, logger=log)[0]
+        if network_status['exists'] and not network_status['owned']:
+            log.error("Conflicting custom network found! There is already a docker network defined: '%s' , but is not owned by this project", config['network']['name'])
+            sys.exit(1)
+        if not network_status['exists']:
+            log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
+            DOCKER.create_network(**config['network'])
+    log.debug("The following images will be built: %s", ', '.join(images_to_build))
+    for image in images_to_build:
+        if isinstance(images_dict[image]['tag'], list):
+            image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'][0])
+        else:
+            image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'])
+        image_status = docker_obj_status(image_n_tag, 'image', DOCKER, logger=log)[0]
+        image_context = PROJ_ROOT
+        if image in base_images_to_build:
+            image_context = DEVLAB_ROOT
+            docker_helper = docker_helper_base
+        else:
+            docker_helper = DOCKER
+        images_dict[image]['docker_file'] = '{}/{}'.format(image_context, images_dict[image]['docker_file'])
+        if 'build_opts' not in images_dict[image]:
+            images_dict[image]['build_opts'] = []
+        if image in base_images_to_build:
+            if image_status['exists'] and image_status['owned']:
+                log.info("Found old base image: '%s' that has bad labels... Removing so it can be rebuilt", image)
+                rm_res = DOCKER.rm_image(image)
+                if rm_res[0] != 0:
+                    log.error("Failed removing image: %s", image)
+                    break
+                else:
+                    for line in rm_res[1]:
+                        log.debug(line)
+                    log.debug("Successfully removed image: %s", image)
+                    image_status['exists'] = False
+                    image_status['owned'] = False
+        elif image_status['exists'] and not image_status['owned']:
+            log.error("Conflicting image found! There is already an image defined: '%s', but is not owned by this project", image_n_tag)
+            break
+        if clean and image_status['exists']:
+            log.info("Removing image: %s", image)
+            rm_res = DOCKER.rm_image(image)
+            if rm_res[0] != 0:
+                log.error("Failed removing image: %s", image)
+            else:
+                for line in rm_res[1]:
+                    log.debug(line)
+                log.debug("Successfully removed image: %s", image)
+        if pull:
+            with open(images_dict[image]['docker_file']) as  dfile:
+                local_image = False
+                for line in dfile.readlines():
+                    if line.startswith('FROM '):
+                        if line.split()[1].split(':')[0] in images_to_build:
+                            local_image = True
+                            log.debug("Skipping pull, as devlab manages this image's base image")
+                            break
+                if not local_image:
+                    images_dict[image]['build_opts'].append('--pull')
+        if no_cache:
+            images_dict[image]['build_opts'].append('--no-cache')
+        log.info("Building image: %s", image_n_tag)
+        bld_res = docker_helper.build_image(image, context=os.path.dirname(images_dict[image]['docker_file']), log_output=log_output, network=config['network']['name'], logger=logging.getLogger('Build-{}'.format(image)), **images_dict[image])
+        if bld_res[0] != 0:
+            log.error("Failed building image: '%s' Aborting...", image)
+            abort = True
+            break
+        else:
+            log.debug("Successfully built image: %s", image)
+    log.info("Cleaning up unused devlab images")
+    pi_res = DOCKER.prune_images()
+    if pi_res[0] != 0:
+        log.error("Failed cleaning(pruning) images")
+    else:
+        log.debug("Successfully cleaned up(pruned) images")
+    if abort:
+        sys.exit(1)
+
+def action_default(**kwargs):
+    """
+    A default action that doesn't really do anything
+    """
+    ignored_args = kwargs
+    PARSER.parse_args(['-h'])
+
+def action_down(components='*', rm=False, **kwargs):
+    """
+    Bring a component down
+
+    Args:
+        components: list of components to bring down, this can also be the
+            string '*' for all
+        rm: bool, Whether to remove the container from docker
+
+    Returns:
+        None
+    """
+    ignored_args = kwargs
+    log = logging.getLogger("Down")
+    components_to_stop = components
+    config = get_config()
+    foreground_comp_name = None
+    if components == '*' or '*' in components:
+        components_to_stop = get_components()
+    log.debug("Getting current list of containers")
+    containers = DOCKER.get_containers()[1]
+    containers_dict = {}
+    for container in containers:
+        containers_dict[container['name']] = container
+    if 'foreground_component' in config:
+        foreground_comp_name = config['foreground_component']['name']
+    if foreground_comp_name:
+        if foreground_comp_name in components_to_stop:
+            components_to_stop.remove(foreground_comp_name)
+            components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
+            components_to_stop.append(foreground_comp_name)
+        else:
+            components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
+    else:
+        components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
+    components_to_stop.reverse()
+    for comp in components_to_stop:
+        comp_cont_name = '{}-devlab'.format(comp)
+        try:
+            if 'up' in containers_dict[comp_cont_name]['status'].lower():
+                log.info("Component: Stopping container: %s...", comp)
+                DOCKER.stop_container(comp_cont_name)
+            else:
+                log.info("Component: %s is already stopped. skipping...", comp)
+            if rm:
+                log.info("Removing container: %s", comp)
+                DOCKER.rm_container(comp_cont_name, force=True)
+        except KeyError:
+            log.info("Component: %s has no container. skipping...", comp)
+
+def action_restart(components='*', update_images=False, **kwargs):
+    """
+    Restart components by bringing them down and then back up again
+
+    Args:
+        update_images: bool, whether or not to try and update images that components rely upon
+    """
+    #restart
+    ignored_args = kwargs
+    log = logging.getLogger('Restart')
+    components_to_restart = components
+    rm = False
+    if components == '*' or '*' in components:
+        components_to_restart = get_components()
+    if update_images:
+        rm = True
+    log.info("Bringing components DOWN")
+    action_down(components=components_to_restart, rm=rm)
+    log.info("Bringing components UP")
+    action_up(components=components_to_restart, update_images=update_images)
+
+def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
+    """
+    Reset a component
+
+    Args:
+        components: list of components to reset
+        reset_wizard: bool, Whether or not to remove files related with the
+            wizard to allow the wizard to prompt for the component again
+        full: bool, whether or not to completely reset everything, including
+            files in CONFIG.paths.reset_full
+
+    Returns:
+        None
+    """
+    ignored_args = kwargs
+    config = get_config()
+    log = logging.getLogger("Reset")
+    foreground_comp_name = None
+    if 'foreground_component' in config:
+        foreground_comp_name = config['foreground_component']['name']
+    add_foreground = False
+    components_to_reset = components
+    if not config['components']:
+        log.error("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
+        sys.exit(1)
+    if 'linux' in sys.platform.lower():
+        if os.geteuid() != 0:
+            log.info("Executing reset command from inside of a container")
+            cargs = []
+            cur_args = list(sys.argv[1:])
+            while cur_args:
+                arg = cur_args.pop(0)
+                #Ignore any previously passed project root
+                if arg.startswith('-'):
+                    if arg in ['-P', '--project-root']:
+                        cur_args.pop(0)
+                        continue
+                    cargs.append("'{}'".format(arg))
+                    if arg not in ['-v', '--version', '-h', '--help']:
+                        cargs.append("'{}'".format(cur_args.pop(0)))
+                else:
+                    #This indicates that we've reached the 'action'
+                    break
+            cargs.append('reset')
+            if reset_wizard:
+                cargs.append('--reset-wizard')
+            if full:
+                cargs.append('--full')
+            if isinstance(components, list):
+                for carg in components:
+                    cargs.append("'{}'".format(carg))
+            else:
+                cargs.append("'{}'".format(components))
+            script_ret = DOCKER.run_container(
+                image='devlab_helper:latest',
+                name='devlab-reset',
+                network=config['network']['name'],
+                mounts=[
+                    '{}:/devlab'.format(PROJ_ROOT),
+                    '{}/devlab:/usr/bin/devlab'.format(DEVLAB_ROOT),
+                    '/var/run/docker.sock:/var/run/docker.sock'
+                ],
+                run_opts=['--rm', '--workdir', '/devlab'],
+                background=False,
+                interactive=True,
+                cmd='/usr/bin/devlab -P /devlab {}'.format(' '.join(cargs)),
+                ignore_nonzero_rc=True,
+                logger=log
+            )
+            if script_ret[0] != 0:
+                log.error('Execution of devlab reset command inside of container failed')
+                sys.exit(1)
+            return
+    if components == '*' or '*' in components:
+        components_to_reset = get_components(enabled_only=False)
+    else:
+        if full:
+            log.error("You have passed specific components, in addition to --full. When using --full, ALL components are assumed")
+            sys.exit(1)
+    log.debug("Getting current list of containers")
+    containers = DOCKER.get_containers()[1]
+    containers_dict = {}
+    for container in containers:
+        containers_dict[container['name']] = container
+    if foreground_comp_name in components_to_reset:
+        components_to_reset.remove(foreground_comp_name)
+        add_foreground = True
+    if 'devlab' in components_to_reset:
+        components_to_reset.remove('devlab') #Devlab isn't a REAL component, so ordinal stuff will fail
+        components_to_reset = get_ordinal_sorting(components_to_reset, config['components'])
+        components_to_reset.insert(0, 'devlab')
+    else:
+        components_to_reset = get_ordinal_sorting(components_to_reset, config['components'])
+    if add_foreground:
+        components_to_reset.insert(0, foreground_comp_name)
+    if full:
+        #Make sure the user is really REALLY sure
+        while True:
+            if 'reset_full' in config['paths']:
+                reset_full = ','.join(config['paths']['reset_full'])
+            else:
+                reset_full = 'Not Defined'
+            print("WARNING!! This will remove the files/directories '{}', as well as any files 'reset_paths' per component, and wizard files. If you have made any manual changes to files they will be erased!".format(reset_full))
+            ans = text_input("Are you sure you want to proceed? (yes/no) ")
+            ans = ans.lower()
+            if ans not in ['yes', 'no']:
+                print("Valid answers are 'yes' or 'no'")
+                continue
+            break
+        if ans == 'yes':
+            if not 'devlab' in components_to_reset:
+                components_to_reset.insert(0, 'devlab')
+            reset_wizard = True
+        else:
+            log.warning("Aborting!")
+            sys.exit(1)
+    components_to_reset.reverse()
+    for comp in components_to_reset:
+        reset_wizard_files = reset_wizard
+        if comp == 'devlab':
+            continue
+        if comp == foreground_comp_name:
+            log.info("Resetting files for foreground component: %s", foreground_comp_name)
+            comp_config = config['foreground_component']
+        else:
+            comp_config = config['components'][comp]
+        if config['components'][comp]['enabled']:
+            action_down(components=[comp], rm=True)
+        else:
+            # Always reset wizard files for components that are disabled
+            reset_wizard_files = True
+        if reset_wizard_files:
+            log.info("Resetting wizard related files for component: '%s'", comp)
+            try:
+                for wpath in config['paths']['component_persistence_wizard_paths']:
+                    full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
+                        PROJ_ROOT=PROJ_ROOT,
+                        comp_pers=config['paths']['component_persistence'],
+                        component=comp,
+                        path=wpath
+                    ).replace('..', '')
+                    log.debug("Looking to see if wizard related path exists: '%s'", full_path)
+                    if os.path.isfile(full_path):
+                        os.remove(full_path)
+                    if os.path.isdir(full_path):
+                        shutil.rmtree(full_path)
+            except KeyError:
+                pass
+        log.info("Resetting files for component: '%s'", comp)
+        try:
+            for rpath in comp_config['reset_paths']:
+                full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
+                    PROJ_ROOT=PROJ_ROOT,
+                    comp_pers=config['paths']['component_persistence'],
+                    component=comp,
+                    path=rpath
+                ).replace('..', '')
+                log.debug("Looking to see if path exists: '%s'", full_path)
+                if os.path.isfile(full_path):
+                    log.debug("Removing file: '%s'", full_path)
+                    os.remove(full_path)
+                if os.path.isdir(full_path):
+                    log.debug("Removing directory: '%s'", full_path)
+                    shutil.rmtree(full_path)
+        except KeyError:
+            pass
+    if 'devlab' in components_to_reset:
+        log.info("Resetting devlab specific files")
+        try:
+            for rpath in config['paths']['reset_paths']:
+                full_path = '{PROJ_ROOT}/{path}'.format(
+                    PROJ_ROOT=PROJ_ROOT,
+                    path=rpath
+                ).replace('..', '')
+                log.debug("Looking to see if path exists: '%s'", full_path)
+                if os.path.isfile(full_path):
+                    log.debug("Removing file: '%s'", full_path)
+                    os.remove(full_path)
+                if os.path.isdir(full_path):
+                    log.debug("Removing directory: '%s'", full_path)
+                    shutil.rmtree(full_path)
+        except KeyError:
+            pass
+    if full:
+        log.info("Resetting paths for 'full' reset")
+        try:
+            for fpath in config['paths']['reset_full']:
+                full_path = '{PROJ_ROOT}/{path}'.format(
+                    PROJ_ROOT=PROJ_ROOT,
+                    path=fpath
+                ).replace('..', '')
+                if os.path.isdir(full_path):
+                    shutil.rmtree(full_path)
+                if os.path.isfile(full_path):
+                    log.debug("Removing file: '%s'", full_path)
+                    os.remove(full_path)
+        except KeyError:
+            pass
+
+def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None, user=None, **kwargs):
+    """
+    Execute a shell or a command inside of a component
+
+    Args:
+        adhoc_image: string of the image to use for adhoc shell action
+        adhoc_name: string of the name to use for the container's name
+        components: string or list of the component(s) to shell or execute
+            a command on. If more than one component is specified then run the
+            command on them sequentially
+        command: string of the command to run. Optional. Default=None
+        user: string of the user to execute the shell command as
+    Returns:
+        None
+    """
+    ignored_args = kwargs
+    log = logging.getLogger("Shell")
+    components_dst = components
+    if components == '*' or '*' in components:
+        components_dst = get_components()
+    if isinstance(command, list):
+        command = ' '.join(command)
+    config = get_config()
+    for component in components_dst:
+        if not command:
+            try:
+                command = config['components'][component]['shell']
+            except KeyError:
+                command = '/bin/bash'
+        ignore_nonzero_rc = bool(command.endswith('/bin/bash') or command.endswith('/bin/sh'))
+        if component != 'adhoc':
+            log.debug("Getting current list of containers")
+            containers = DOCKER.get_containers()[1]
+            container_names = [cntr['name'] for cntr in containers]
+            log.debug("Current list of containers: '%s'", ', '.join(container_names))
+            if '{}-devlab'.format(component) not in container_names:
+                log.error("Component: %s is not currently running. Aborting", component)
+                sys.exit(1)
+        else:
+            if not (command.startswith('helper_container|') or command.startswith('running_container|')):
+                log.debug("Building adhoc command...")
+                adhoc_image = adhoc_image.replace(':', '^')
+                adhoc_image_split = adhoc_image.split('^')
+                adhoc_image = adhoc_image_split[0]
+                try:
+                    adhoc_image_tag = adhoc_image_split[1]
+                except IndexError:
+                    adhoc_image_tag = 'latest'
+                if not adhoc_name:
+                    adhoc_name = '{}-adhoc'.format(adhoc_image.replace('/', '_'))
+                command = 'helper_container|{}^{}^{}: {}'.format(adhoc_image, adhoc_image_tag, adhoc_name, command)
+                log.debug("Built adhoc command: '%s'", command)
+        script_runner(command, '{}-devlab'.format(component), log=log, ignore_nonzero_rc=ignore_nonzero_rc, user=user)
+
+def action_global_status(**kwargs):
+    """
+    Generates a global status of all environments spun up with devlab
+    """
+    ignored_args = kwargs
+    global_devlab_docker = DockerHelper(
+        filter_label='com.lab.type=devlab'
+    )
+    containers = global_devlab_docker.get_containers()[1]
+    status_by_project = {}
+    status_header = {
+        'container_name': 'Container Name',
+        'status': 'Status',
+        'local_port': 'Docker exposed'
+    }
+    status_table_head = []
+    status_header_format = "| {container_name:^21} | {status:^10} | {local_port:^32} |"
+    status_row_format = "| {container_name:21} | {status:10} | {local_port:32} |"
+    status_width = len(status_header_format.format(**status_header))
+    status_table_bar = '{{:-<{}}}'.format(status_width)
+    status_table_head.append(status_table_bar.format(''))
+    status_table_head.append(status_header_format.format(**status_header))
+    status_table_head.append(status_table_bar.format(''))
+    for cont in containers:
+        first_port = True
+        exposed_ports = False
+        status_row = {
+            'container_name': cont['name'],
+            'status': '',
+            'local_port': ''
+        }
+        rows = []
+        state = cont['status']
+        details = global_devlab_docker.inspect_container(cont['name'])[0]
+        labels = details['Config']['Labels']
+        container_project = 'ORPHANED (Unknown project origin)'
+        for label in labels:
+            if label == 'com.lab.project':
+                container_project = labels[label]
+                break
+        if 'up' in state.lower():
+            status_row['status'] = 'up'
+        else:
+            status_row['status'] = 'stopped'
+        for port in details['HostConfig']['PortBindings']:
+            exposed_ports = True
+            cont_port, port_proto = port.split('/')
+            host_port = details['HostConfig']['PortBindings'][port][0]['HostPort']
+            port_str = 'Host: {host_port}({proto}) -> Cont: {cont_port}'.format(proto=port_proto, host_port=host_port, cont_port=cont_port)
+            if first_port:
+                status_row['local_port'] = port_str
+                rows.append(status_row)
+                first_port = False
+            else:
+                rows.append({
+                    'container_name': '',
+                    'status': '',
+                    'local_port': port_str
+                })
+        if not exposed_ports:
+            rows.append(status_row)
+        try:
+            status_by_project[container_project] += rows
+        except KeyError:
+            status_by_project[container_project] = []
+            status_by_project[container_project] += rows
+    for project in status_by_project:
+        print("##\n## Project: \n##  {}\n##".format(project))
+        print('\n'.join(status_table_head))
+        for row in status_by_project[project]:
+            print(status_row_format.format(**row))
+        print(status_table_bar.format(''))
+        print('')
+    sys.exit(0)
+
+def action_status(**kwargs):
+    """
+    Generates a status of the local devlab environment
+    """
+    ignored_args = kwargs
+    log = logging.getLogger("Status")
+    config = get_config()
+    foreground_comp_name = None
+    if 'foreground_component' in config:
+        foreground_comp_name = config['foreground_component']['name']
+    log.debug("Getting current list of devlab containers")
+    containers = DOCKER.get_containers()[1]
+    containers_dict = {}
+    for container in containers:
+        containers_dict[container['name']] = container
+    container_names = [cntr['name'] for cntr in containers]
+    log.debug("Getting list of configured components")
+    cur_components = get_components()
+    try:
+        if foreground_comp_name in cur_components:
+            cur_components.remove(foreground_comp_name)
+            components = get_ordinal_sorting(cur_components, config['components'])
+            components.append(foreground_comp_name)
+        else:
+            components = get_ordinal_sorting(cur_components, config['components'])
+    except KeyError:
+        components = []
+    if not components:
+        if container_names:
+            log.warning("Found orphaned containers: %s", ', '.join(container_names))
+            log.warning("It is recommended that you run: 'docker rm -f %s'", ' '.join(container_names))
+        else:
+            log.info("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
+        sys.exit(1)
+    existing_components = list(
+        name[0:len(name)-7] for name in list(
+            filter(
+                lambda cnt_n: cnt_n.endswith('-devlab'), container_names
+            )
+        )
+    )
+    running_components = list()
+    stopped_components = list()
+    missing_components = list()
+    for comp in components:
+        try:
+            if 'up' in containers_dict['{}-devlab'.format(comp)]['status'].lower():
+                running_components.append(comp)
+            else:
+                stopped_components.append(comp)
+        except KeyError:
+            missing_components.append(comp)
+    orphaned_components = list(set(existing_components) - set(components))
+    if orphaned_components:
+        log.warning("There are orphaned containers: '%s'", ', '.join(orphaned_components))
+        log.warning("It is recommended that you run: 'docker rm -f %s'", ' '.join(orphaned_components))
+    log.debug("Configured components: '%s'", ', '.join(components))
+    log.debug("Current list of running devlab containers: '%s'", ', '.join(container_names))
+    log.debug("Current list of all components that exist: '%s'", ', '.join(existing_components))
+    log.debug("Current running components: '%s'", ', '.join(running_components))
+    log.debug("Building tables")
+    status_table = []
+    links_table = []
+    #Generate Header for Status table
+    status_header = {
+        'component': 'Component',
+        'container_name': 'Container Name',
+        'status': 'Status',
+        'health': 'Health',
+        'local_port': 'Docker exposed'
+    }
+    status_header_format = "| {component:^16} | {container_name:^22} | {status:^8} | {health:^20} | {local_port:^14} |"
+    status_row_format = "| {component:16} | {container_name:22} | {status:8} | {health:^20} | {local_port:14} |"
+    status_width = len(status_header_format.format(**status_header))
+    status_table_bar = '{{:-<{}}}'.format(status_width)
+    status_table.append(status_table_bar.format(''))
+    status_table.append(status_header_format.format(**status_header))
+    status_table.append(status_table_bar.format(''))
+    #Generate Header for Links table
+    links_header = {
+        'component': 'Component',
+        'link': 'Link(s)',
+        'comment': 'Comment'
+    }
+    links_header_format = "| {component:^16} | {link:^40} | {comment:^65} |"
+    links_row_format = "| {component:16} | {link:40} | {comment:65} |"
+    links_width = len(links_header_format.format(**links_header))
+    links_table_bar = '{{:-<{}}}'.format(links_width)
+    links_table.append(links_table_bar.format(''))
+    links_table.append(links_header_format.format(**links_header))
+    links_table.append(links_table_bar.format(''))
+    host_ip = get_primary_ip()
+    #Print rows
+    for comp in components:
+        status_row = {
+            'component': comp,
+            'container_name': '',
+            'health': 'unknown',
+            'local_port': ''
+        }
+        format_fillers = {
+            'container_name': None,
+            'host_ip': host_ip,
+            'local_port': None
+        }
+        status_dict = {}
+        status_ports = []
+        if comp in existing_components:
+            status_row['container_name'] = '{}-devlab'.format(comp)
+            format_fillers['container_name'] = status_row['container_name']
+        if comp in running_components:
+            try:
+                first_port = True
+                for port in config['components'][comp]['ports']:
+                    local_port = parse_docker_local_ports(port)
+                    if first_port:
+                        status_row['local_port'] = local_port
+                        first_port = False
+                    else:
+                        status_ports.append({
+                            'component': '',
+                            'container_name': '',
+                            'health': '',
+                            'status': '',
+                            'local_port': local_port
+                        })
+            except KeyError:
+                status_row['local_port'] = ''
+            format_fillers['local_port'] = status_row['local_port'].split('(')[0]
+            status_row['status'] = 'up'
+            status_script = ''
+            try:
+                status_script = config['components'][comp]['status_script']
+                if status_script:
+                    log.debug("Found status script: '%s'", status_script)
+            except KeyError:
+                try:
+                    status_script = config['foreground_component']['status_script']
+                except KeyError:
+                    log.debug("Skipping status script for component: '%s' as none is defined", comp)
+                    if format_fillers['local_port']:
+                        status_row['health'] = 'healthy'
+                        for port in config['components'][comp]['ports']:
+                            if 'udp' in port:
+                                continue
+                            port = parse_docker_local_ports(port)
+                            log.debug("Performing basic port check on '%s', port '%s', for health check", comp, port)
+                            if not port_check('127.0.0.1', format_fillers['local_port'].split('-')[0].split('(')[0]):
+                                log.warning("Basic port status check failed for '%s', port '%s'", comp, port)
+                                status_row['health'] = 'degraded'
+                            else:
+                                log.debug("Basic port status check successful for '%s', port '%s'", comp, port)
+            if status_script:
+                script_ret = script_runner(status_script, name=status_row['container_name'], interactive=False, log_output=False)
+                if script_ret[0] != 0:
+                    log.warning("Errors occurred executing status script for component: '%s' Skipping!!", comp)
+                else:
+                    try:
+                        status_dict = json.loads(' '.join(script_ret[1]))
+                    except json.decoder.JSONDecodeError:
+                        log.warning("Status script: '%s' did NOT return valid JSON for component: '%s', Skipping!!", status_script, comp)
+                try:
+                    status_row['health'] = status_dict['status']['health']
+                except KeyError:
+                    pass
+                try:
+                    first_link = True
+                    for link in status_dict['links']:
+                        #Fill in any values as results from links support string formatting
+                        link = {k: v.format(**format_fillers) for k, v in link.items()}
+                        if first_link:
+                            links_table.append(links_row_format.format(component=comp, **link))
+                            first_link = False
+                        else:
+                            links_table.append(links_row_format.format(component='', **link))
+                except KeyError:
+                    pass
+        elif comp in stopped_components:
+            status_row['status'] = 'stopped'
+        else:
+            status_row['status'] = 'missing'
+        status_table.append(status_row_format.format(**status_row))
+        for status_port in status_ports:
+            status_table.append(status_row_format.format(**status_port))
+    #Generate Footers
+    status_table.append(status_table_bar.format(''))
+    links_table.append(links_table_bar.format(''))
+    print('\n## COMPONENT STATUS ##')
+    print('\n'.join(status_table))
+    print('')
+    if len(links_table) > 4:
+        print('## LINKS ##')
+        print('\n'.join(links_table))
+
+def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_on_error=False, update_images=False, **kwargs): #pylint: disable=too-many-branches,too-many-statements
+    """
+    This is responsible for the "up" action, intended to bring up different components
+
+    Args:
+        components: list of components to start, this can also be the string *
+        skip_provision: bool whether or not the privisioning scripts should be
+            skipped when starting up components. Default=False
+        bind_to_host: bool whether or not we should spin things up against
+            that other systems on your host's network will be able to easily
+            work with the spun up components. Default=False
+        update_images: bool, whether or not images should be updated with fresh
+            layers etc... from docker repo/registry
+    Returns:
+        None
+    """
+    up_env = {
+        'HOST_IP': get_primary_ip(),
+        'BIND_TO_HOST': bind_to_host
+    }
+    ignored_args = kwargs
+    log = logging.getLogger("Run/Up")
+    components_to_run = components
+    errors = 0
+    base_to_build = []
+    runtime_to_build = []
+    force_reprov = False
+    reprovisionable_components = []
+    foreground_comp_name = None
+    config = get_config()
+    if 'reprovisionable_components' in config:
+        reprovisionable_components = config['reprovisionable_components']
+    if 'foreground_component' in config:
+        foreground_comp_name = config['foreground_component']['name']
+    if components == '*' or '*' in components:
+        components_to_run = get_components()
+    log.debug("Components passed: '%s', components_to_run: '%s'", components, components_to_run)
+    for comp in components_to_run:
+        if comp == foreground_comp_name:
+            continue
+        if not config['components'][comp]['enabled']:
+            log.error("Component: '%s' is not enabled/configured. Aborting", comp)
+            sys.exit(1)
+    if foreground_comp_name in components_to_run:
+        components_to_run.remove(foreground_comp_name)
+        components_to_run = get_ordinal_sorting(components_to_run, config['components'])
+        components_to_run.append(foreground_comp_name)
+    else:
+        components_to_run = get_ordinal_sorting(components_to_run, config['components'])
+    log.debug("The following components will be started in this order: %s", ', '.join(components_to_run))
+    if update_images:
+        log.info("Looking for and updating images needed by components: %s", ','.join(components_to_run))
+        update_component_images(components=components_to_run)
+    needed_images = get_needed_images()
+    if needed_images['base_images']['missing']:
+        base_to_build = needed_images['base_images']['missing']
+        log.debug("Images: '%s' not found in list of current images", base_to_build)
+        log.info("Need to build some base images before trying to start containers")
+        action_build(images=base_to_build)
+    if config['network']['name']:
+        network_status = docker_obj_status(config['network']['name'], 'network', DOCKER, logger=log)[0]
+        if network_status['exists'] and not network_status['owned']:
+            log.error("Conflicting custom network found! There is already a docker network defined with this name, but is not owned by this project")
+            sys.exit(1)
+        if not network_status['exists']:
+            log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
+            DOCKER.create_network(**config['network'])
+    if needed_images['runtime_images']['missing']:
+        runtime_to_build = needed_images['runtime_images']['missing']
+        log.debug("Runtime Images: '%s' not found in list of current images", runtime_to_build)
+        log.info("Need to build some runtime images before trying to start containers")
+        action_build(images=runtime_to_build)
+    if not os.path.isdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence'])):
+        os.mkdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence']))
+    if os.path.isfile('{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence'])):
+        prev_env = get_env_from_file('{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence']))
+    else:
+        prev_env = dict(up_env)
+    if bind_to_host:
+        primary_ip = up_env['HOST_IP']
+        prev_primary_ip = prev_env['HOST_IP']
+        if primary_ip != prev_primary_ip:
+            log.warning("Your host's IP Address has changed from: %s to %s. This means we must re-provision components", prev_primary_ip, primary_ip)
+            force_reprov = True
+    log.debug("Saving this devlab's environment")
+    save_env_file(up_env, '{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence']), force_upper_keys=True)
+    log.debug("Getting current list of containers")
+    containers = DOCKER.get_containers()[1]
+    container_names = [cntr['name'] for cntr in containers]
+    log.debug("Current list of containers: '%s'", ', '.join(container_names))
+    for comp in components_to_run:
+        if comp == foreground_comp_name:
+            continue
+        comp_cont_name = '{}-devlab'.format(comp)
+        cont_status = docker_obj_status(comp_cont_name, 'container', DOCKER, logger=log)[0]
+        if cont_status['exists'] and not cont_status['owned']:
+            log.error("Container: '%s' already exists, but is NOT owned by this project!", comp_cont_name)
+            break
+        if update_images:
+            if cont_status['exists']:
+                log.warning("Container: '%s' exists, and we just updated containers, You'll need to restart the container to USE the new image", comp)
+        if comp_cont_name in container_names:
+            #See if we should reprovision the existing container
+            for r_comp in reprovisionable_components:
+                if comp.startswith(r_comp):
+                    if force_reprov:
+                        log.warning("Removing and resetting data in existing container: '%s' as it needs to be reprovisioned", comp_cont_name)
+                        action_reset(comp)
+                        log.debug("Refreshing current list of containers")
+                        containers = DOCKER.get_containers()[1]
+        cup_ret = component_up(
+            name=comp,
+            comp_config=config['components'][comp],
+            skip_provision=skip_provision,
+            keep_up_on_error=keep_up_on_error,
+            current_containers=containers,
+            network=config['network']['name'],
+            logger=log
+        )
+        if not cup_ret:
+            errors += 1
+            break
+    if errors == 0:
+        if foreground_comp_name:
+            if foreground_comp_name in components_to_run:
+                del config['foreground_component']['name']
+                log.info("Starting the main foreground component: %s", foreground_comp_name)
+                fup_ret = component_up(
+                    name=foreground_comp_name,
+                    comp_config=config['foreground_component'],
+                    skip_provision=True,
+                    keep_up_on_error=keep_up_on_error,
+                    current_containers=containers,
+                    network=config['network']['name'],
+                    background=False,
+                    logger=log
+                )
+                if not fup_ret:
+                    errors += 1
+                action_down()
+    if errors > 0:
+        sys.exit(errors)
+    if update_images:
+        log.info("Cleaning up any dangling images")
+        pi_res = DOCKER.prune_images(prune_all=True)
+        if pi_res[0] != 0:
+            log.error("Failed cleaning(pruning) images")
+        else:
+            log.debug("Successfully cleaned up(pruned) images")
+
+def action_update(uninstall=False, set_version=None, **kwargs):
+    """
+    Use the installer to try and update devlab to the latest version in the repo
+
+    Args:
+        uninstall: bool, indicating to uninstall instead of update
+        set_version: str, indicating a specific version of devlab to install
+
+    Returns:
+        None (In fact this function should call sys.exit)
+    """
+    ignored_args = kwargs
+    log = logging.getLogger("Run/Up")
+    log.debug("Running installer.py to check for updates etc...")
+    command = '{}/installer.py'.format(DEVLAB_ROOT)
+    args = []
+    if uninstall and set_version:
+        log.error("Cannot uninstall a specific version. Uninstall takes no argument")
+        sys.exit(1)
+    if uninstall:
+        args.append('uninstall')
+    if set_version:
+        args += ['install', '--set-version', set_version]
+    inst_out = Command(command, args, interactive=True).run()
+    if inst_out[0] != 0:
+        log.error("Installer did not exit successfully... Aborting!")
+        sys.exit(1)
+    sys.exit(0)
+
+def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False, current_containers=None, background=True, network=None, logger=None):
+    """
+    Bring a component up
+    """
+    comp = name
+    comp_cont_name = '{}-devlab'.format(comp)
+    containers_dict = {}
+    errors = False
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('component_up')
+    if not current_containers:
+        log.debug("Getting current list of containers")
+        current_containers = DOCKER.get_containers()[1]
+    for container in current_containers:
+        containers_dict[container['name']] = container
+    container_names = [cntr['name'] for cntr in current_containers]
+    new_container = True
+    while True:
+        if comp_cont_name in container_names:
+            if 'up' in containers_dict[comp_cont_name]['status'].lower():
+                log.info("Component: %s is already running. Skipping...", comp)
+                break
+            else:
+                log.info("Component: %s has already been created, Starting container...", comp)
+                DOCKER.start_container(comp_cont_name)
+                new_container = False
+        if new_container:
+            if 'mounts' in comp_config:
+                mount_list = []
+                for mount in comp_config['mounts']:
+                    if mount[0] != '/':
+                        mount_list.append('{}/{}'.format(PROJ_ROOT, mount))
+                    else:
+                        mount_list.append(mount)
+                comp_config['mounts'] = list(mount_list)
+            if 'run_opts' not in comp_config:
+                comp_config['run_opts'] = list()
+            if 'pre_scripts' in comp_config:
+                for script in comp_config['pre_scripts']:
+                    log.debug("Found Pre script: '%s'", script)
+                    script_ret = script_runner(script, name=comp_cont_name, log=log)
+                    if script_ret[0] != 0:
+                        errors = True
+                        break
+                if errors:
+                    break
+            log.info("Starting component: %s", comp)
+            if not background:
+                comp_config['run_opts'].append('--rm')
+            run_ret = DOCKER.run_container(
+                name=comp_cont_name,
+                network=network,
+                background=background,
+                interactive=not background,
+                log_output=False,
+                **comp_config
+            )
+            if run_ret[0] == 0:
+                log.debug("Successfully started component: '%s' as container: '%s'", comp, comp_cont_name)
+            else:
+                log.error("FAILED to start component: '%s' as container: '%s'. Aborting...", comp, comp_cont_name)
+                if not keep_up_on_error:
+                    action_down(components=[comp], rm=True)
+                errors = True
+                break
+            if 'scripts' in comp_config and not skip_provision:
+                for script in comp_config['scripts']:
+                    log.debug("Found provisioning script: '%s'", script)
+                    script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
+                    if script_ret[0] != 0:
+                        if not keep_up_on_error:
+                            action_down(components=[comp], rm=True)
+                        errors = True
+                        break
+                if errors:
+                    if not keep_up_on_error:
+                        action_down(components=[comp], rm=True)
+                    break
+        if 'post_up_scripts' in comp_config and background:
+            for script in comp_config['post_up_scripts']:
+                log.debug("Found Post up script: '%s'", script)
+                script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
+                if script_ret[0] != 0:
+                    errors = True
+                    break
+            if errors:
+                break
+        break
+    return not errors
+
+def docker_obj_status(name, obj_type, docker_helper, logger=None):
+    """
+    Determine if a specific docker object like an image, container, or network
+    exists, and if it is "owned" by the current project
+
+    Args:
+        name: str or list, of the name(s) of the object
+        obj_type: str, one of 'network', 'container', 'image', or 'image_bare'
+            NOTE:
+                'image' includes the tag in the image name. Like: 'stuff:1.0'
+                'image_bare' is the image name without the tag.
+        docker_helper: DockerHelper, to use for querying docker objects
+        logger: Logger, for to use for logging
+    Return:
+        list of dicts.
+        dict structure:
+            {
+                'name': str, of the object name
+                'exists': bool, whether and object with 'name' exists.
+                'owned': bool, whether the object is owned by the specific project
+            }
+    """
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('docker_obj_status')
+    result = list()
+    res_tmpl = {
+        'name': None,
+        'exists': False,
+        'owned': False
+    }
+    owned_obj = list()
+    all_obj = list()
+    if obj_type == 'network':
+        owned_networks = docker_helper.get_networks()[1]
+        owned_obj = [net['name'] for net in owned_networks]
+        all_networks = docker_helper.get_networks(return_all=True)[1]
+        all_obj = [net['name'] for net in all_networks]
+    elif obj_type == 'container':
+        owned_containers = docker_helper.get_containers()[1]
+        owned_obj = [cont['name'] for cont in owned_containers]
+        all_containers = docker_helper.get_containers(return_all=True)[1]
+        all_obj = [cont['name'] for cont in all_containers]
+    elif obj_type == 'image':
+        owned_obj = docker_helper.get_images()[1]
+        all_obj = docker_helper.get_images(return_all=True)[1]
+    elif obj_type == 'image_bare':
+        owned_images = docker_helper.get_images()[1]
+        owned_obj = [image.split(':')[0] for image in owned_images]
+        all_images = docker_helper.get_images(return_all=True)[1]
+        all_obj = [image.split(':')[0] for image in all_images]
+    else:
+        log.warning("Unknown docker object type: '%s'", obj_type)
+    if isinstance(name, list):
+        for nme in name:
+            res = dict(res_tmpl)
+            res['name'] = nme
+            if nme in owned_obj:
+                res['exists'] = True
+                res['owned'] = True
+            elif nme in all_obj:
+                res['exists'] = True
+            result.append(res)
+    else:
+        res = dict(res_tmpl)
+        res['name'] = name
+        if name in owned_obj:
+            res['exists'] = True
+            res['owned'] = True
+        elif name in all_obj:
+            res['exists'] = True
+        result.append(res)
+    return result
+
+def get_env_from_file(env_file):
+    """
+    This reads the file 'env_file' and tries to convert a bash ENV style format
+    to a dict... for example:
+        MY_VAR='hello'
+        OTHER_VAR='world'
+    Would become:
+        {
+            'MY_VAR': 'hello',
+            'OTHER_VAR': 'world'
+        }
+
+    Returns:
+        Generated Dictionary
+    """
+    conf = {}
+    if os.path.isfile(env_file):
+        with open(env_file, 'r') as efile:
+            for line in efile:
+                line = line.strip()
+                line_split = line.split('=')
+                key = line_split[0]
+                val = '='.join(line_split[1:])
+                #Strip off enclosing quotes
+                for qot in ('"', "'"):
+                    if val[0] == qot:
+                        val = val[1:]
+                        val = val[:-1]
+                if val.lower() in ('true', 'false'):
+                    val = bool(val.lower())
+                conf[key] = val
+    return conf
+
+def get_components(enabled_only=True):
+    """
+    Try to list available components
+    """
+    config = get_config()
+    if 'components' not in config:
+        config = get_config(fallback_default=True)
+        if 'components' not in config:
+            return []
+    if enabled_only:
+        components = list(filter(lambda comp: config['components'][comp]['enabled'], config['components']))
+    else:
+        components = list(config['components'])
+    if 'foreground_component' in config:
+        components.append(config['foreground_component']['name'])
+    components.sort()
+    return components
+
+def get_runtime_images():
+    """
+    Try to get a list of available runtime images
+    """
+    config = get_config()
+    if 'runtime_images' not in config:
+        config = get_config(fallback_default=True)
+        if 'runtime_images' not in config:
+            return []
+    runtime_images = list(config['runtime_images'].keys())
+    runtime_images.sort()
+    return runtime_images
+
+def get_config(fallback_default=False):
+    """
+    Try to load the main config file
+    """
+    global IMAGES
+    config = deepcopy(CONFIG_DEF)
+    loaded_config = {}
+    for cfile_name in CONFIG_FILE_NAMES:
+        if os.path.isfile('{}/{}'.format(PROJ_ROOT, cfile_name)):
+            with open('{}/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
+                try:
+                    loaded_config = json.load(config_file)
+                except json.decoder.JSONDecodeError:
+                    exc_type, exc_value = sys.exc_info()[:2]
+                    exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
+                        cfile_name=cfile_name,
+                        exc_type=exc_type.__name__,
+                        exc_val=exc_value
+                    )
+                    print(exc_str)
+                    sys.exit(1)
+                break
+        elif fallback_default:
+            if os.path.isfile('{}/defaults/{}'.format(PROJ_ROOT, cfile_name)):
+                with open('{}/defaults/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
+                    try:
+                        loaded_config = json.load(config_file)
+                    except json.decoder.JSONDecodeError:
+                        exc_type, exc_value = sys.exc_info()[:2]
+                        exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
+                            cfile_name=cfile_name,
+                            exc_type=exc_type.__name__,
+                            exc_val=exc_value
+                        )
+                        print(exc_str)
+                        sys.exit(1)
+                    break
+    config.update(loaded_config)
+    return config
+
+def get_needed_images(components=None, logger=None):
+    """
+    Look at the configuration and determine which images are needed, depending
+    on which components are configured and what they depend on.
+
+    Args:
+        logger: Logging, object
+
+    Returns:
+        dict:
+        {
+            'runtime_images': {
+                'missing': [],
+                'exists': [],
+                'exists_owned': [],
+            },
+            'base_images': {
+                'missing': [],
+                'exists': [],
+                'exists_owned': [],
+            },
+            'external_images': {
+                'missing': [],
+                'exists': [],
+                'exists_owned': []
+            }
+        }
+    """
+    config = get_config()
+    if not components:
+        components = get_components()
+    base_images = list(IMAGES.keys())
+    foreground_comp_name = None
+    if 'foreground_component' in config:
+        foreground_comp_name = config['foreground_component']['name']
+    runtime_images_rdeps = []
+    runtime_images_dict = None
+    external_images_rdeps = []
+    result = {
+        'runtime_images': {
+            'missing': [],
+            'exists': [],
+            'exists_owned': [],
+        },
+        'base_images': {
+            'missing': [],
+            'exists': [],
+            'exists_owned': [],
+        },
+        'external_images': {
+            'missing': [],
+            'exists': [],
+            'exists_owned': []
+        }
+    }
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('get_needed_images')
+    #Get a status for all of the base images, to see if they exist or not
+    base_images_status = docker_obj_status(
+        name=base_images,
+        obj_type='image_bare',
+        docker_helper=DOCKER,
+        logger=log
+    )
+    #Find missing/exists, and owned base images:
+    for image in base_images_status:
+        if not image['exists']:
+            log.debug("Base Image/tag: '%s' not found in list of current images: %s", image['name'], base_images)
+            result['base_images']['missing'].append(image['name'])
+            continue
+        else:
+            result['base_images']['exists'].append(image['name'])
+            if image['owned']:
+                result['base_images']['exists_owned'].append(image['name'])
+    try:
+        runtime_images_dict = dict(config['runtime_images'])
+    except KeyError:
+        log.debug("No runtime_images defined. Skipping...")
+    #Find runtime images that are reverse dependencies
+    if runtime_images_dict:
+        rt_images = list(runtime_images_dict.keys())
+    else:
+        log.debug("No runtime based images defined. Skipping checks for their reverse dependencies")
+        rt_images = []
+    #Look for references in components
+    for comp in components:
+        if comp == foreground_comp_name:
+            comp_config = config['foreground_component']
+            comp_config['enabled'] = True
+        else:
+            comp_config = config['components'][comp]
+        if comp_config['enabled']:
+            comp_img = comp_config['image'].split(':')[0]
+            #Found direct dependencies for a component's image
+            if comp_img in rt_images:
+                image_n_tag = '{}:{}'.format(comp_img, runtime_images_dict[comp_img]['tag'])
+                if image_n_tag not in runtime_images_rdeps:
+                    log.debug("Discovered needed runtime Image/tag (Direct dependency by component '%s'): '%s'", comp, image_n_tag)
+                    runtime_images_rdeps.append(image_n_tag)
+            elif comp_img in base_images:
+                log.debug("Discovered needed base image (Direct dependency by component '%s'): %s", comp, comp_img)
+            else:
+                try:
+                    tag = comp_config['image'].split(':')[1]
+                except IndexError:
+                    tag = 'latest'
+                image_n_tag = '{}:{}'.format(comp_img, tag)
+                if image_n_tag not in external_images_rdeps:
+                    log.debug("Discovered needed external Image/tag (Direct dependency by component '%s'): '%s'", comp, image_n_tag)
+                    external_images_rdeps.append(image_n_tag)
+            #Look for reverse dependencies inside of scripts, status_scripts, pre_scripts, and post_up_scripts
+            for script_key in ('scripts', 'status_script', 'pre_scripts', 'post_up_scripts'):
+                try:
+                    script_cmd = comp_config[script_key]
+                except KeyError:
+                    continue
+                if isinstance(script_cmd, list):
+                    for scr in script_cmd:
+                        if scr.startswith('helper_container|'):
+                            script_image = scr.split(':')[0].split('|')[1]
+                            #Found a reverse dependency on a runtime image from a script
+                            if script_image in rt_images:
+                                itag = runtime_images_dict[script_image]['tag']
+                                if isinstance(itag, list):
+                                    itag = itag[0]
+                                image_n_tag = '{}:{}'.format(script_image, itag)
+                                if image_n_tag not in runtime_images_rdeps:
+                                    log.debug("Discovered needed runtime Image/tag (runtime from scripts used by component '%s'): '%s'", comp, image_n_tag)
+                                    if image_n_tag not in runtime_images_rdeps:
+                                        runtime_images_rdeps.append(image_n_tag)
+                            elif script_image in base_images:
+                                log.debug("Discovered needed base image (from scripts used by component '%s'): %s", comp, script_image)
+                            else:
+                                try:
+                                    tag = script_image.split('^')[1]
+                                except IndexError:
+                                    tag = 'latest'
+                                script_image_tag = '{}:{}'.format(script_image.split('^')[0], tag)
+                                if script_image_tag not in external_images_rdeps:
+                                    log.debug("Discovered needed external image (from scripts used by component '%s'): %s", comp, script_image_tag)
+                                    external_images_rdeps.append(script_image_tag)
+                else:
+                    if script_cmd.startswith('helper_container|'):
+                        script_image = script_cmd.split(':')[0].split('|')[1]
+                        #Found a reverese dependency on a runtime images from a script
+                        if script_image in rt_images:
+                            itag = runtime_images_dict[script_image]['tag']
+                            if isinstance(itag, list):
+                                itag = itag[0]
+                            image_n_tag = '{}:{}'.format(script_image, itag)
+                            if image_n_tag not in runtime_images_rdeps:
+                                log.debug("Discovered needed runtime Image/tag (runtime from scripts used by component '%s'): '%s'", comp, image_n_tag)
+                                runtime_images_rdeps.append(image_n_tag)
+                        elif script_image in base_images:
+                            log.debug("Discovered needed base image (from scripts used by component '%s'): %s", comp, script_image)
+                        else:
+                            try:
+                                tag = script_image.split('^')[1]
+                            except IndexError:
+                                tag = 'latest'
+                            script_image_tag = '{}:{}'.format(script_image.split('^')[0], tag)
+                            if script_image_tag not in external_images_rdeps:
+                                log.debug("Discovered needed external image (from scripts used by component '%s'): %s", comp, script_image_tag)
+                                external_images_rdeps.append(script_image_tag)
+    runtime_images_status = docker_obj_status(
+        name=runtime_images_rdeps,
+        obj_type='image',
+        docker_helper=DOCKER,
+        logger=log
+    )
+    for rt_image in runtime_images_status:
+        if not rt_image['exists']:
+            log.debug("Runtime Image/tag: '%s' not found in list of current images: %s", rt_image['name'], runtime_images_rdeps)
+            result['runtime_images']['missing'].append(rt_image['name'].split(':')[0])
+            continue
+        else:
+            result['runtime_images']['exists'].append(rt_image['name'].split(':')[0])
+            if rt_image['owned']:
+                result['runtime_images']['exists_owned'].append(rt_image['name'].split(':')[0])
+    external_images_status = docker_obj_status(
+        name=external_images_rdeps,
+        obj_type='image',
+        docker_helper=DOCKER,
+        logger=log
+    )
+    for ext_image in external_images_status:
+        if not ext_image['exists']:
+            log.debug("External Image/tag: '%s' not found in list of current images: %s", ext_image['name'], runtime_images_rdeps)
+            result['external_images']['missing'].append(ext_image['name'])
+            continue
+        else:
+            result['external_images']['exists'].append(ext_image['name'])
+            if ext_image['owned']:
+                result['external_images']['exists_owned'].append(ext_image['name'])
+    return result
+
+def get_ordinal_sorting(components, config_components):
+    """
+    Go through the components in the list 'components', and generate a
+    sorted list per their ordinal in the config_components
+    """
+    #First generate a dict of the combined ordinals and components
+    ordinals = {}
+    ordinal_sorted = []
+    log = logging.getLogger('get_ordinal_sorting')
+    log.debug("Will be getting ordinal sorting for components: '%s'", ', '.join(components))
+    for comp in components:
+        try:
+            exists = config_components[comp]
+            del exists
+        except KeyError:
+            raise RuntimeError("Unknown component: {}".format(comp))
+        try:
+            grp = config_components[comp]['ordinal']['group']
+        except KeyError:
+            grp = 100
+        try:
+            num = config_components[comp]['ordinal']['number']
+        except KeyError:
+            num = 100
+        ordinals['{}:{}|{}'.format(grp, num, comp)] = comp
+    log.debug("Ordinals found for components: %s", ordinals)
+    def human_keys(astr):
+        """
+        Sorts keys based on human order.. IE 1 is less than 10 etc..
+
+        alist.sort(key=human_keys) sorts in human order
+        """
+        keys = []
+        for elt in re.split(r'(\d+)', astr):
+            elt = elt.swapcase()
+            try:
+                elt = int(elt)
+            except ValueError:
+                pass
+            keys.append(elt)
+        return keys
+    #Get the list of ordinals, and human sort them
+    ordinal_list = sorted(tuple(ordinals.keys()), key=human_keys)
+    log.debug("Sorted list of ordinals: '%s'", ', '.join(ordinal_list))
+    #Generate the sorted list of components by the sorted ordinal
+    for ordinal in ordinal_list:
+        ordinal_sorted.append(ordinals[ordinal])
+    log.debug("Sorted components by ordinal: '%s'", ', '.join(ordinal_sorted))
+    return ordinal_sorted
+
+def get_primary_ip():
+    """
+    Gets the IP address of whichever interface has a default route
+
+    Based on: https://stackoverflow.com/a/28950776
+    """
+    broadcast_nets = (
+        '10.255.255.255',
+        '172.31.255.255',
+        '192.168.255.255',
+        '172.30.255.1'      #This would be the hosts ip for our docker network
+    )
+    ip = '127.0.0.1'
+    for bnet in broadcast_nets:
+        skt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Doesn't have to be directly reachable
+            skt.connect((bnet, 1))
+            ip = skt.getsockname()[0]
+            break
+        except: #pylint: disable=bare-except
+            pass
+        finally:
+            skt.close()
+    return ip
+
+def get_proj_root(start_dir=None):
+    """
+    Try and determine the project's root path
+
+    Args:
+        start_dir: String of the path where to start traversing backwards
+            looking for the DevlabConfig.json, config.json and equivalents in defaults/
+
+    Returns:
+        String of the path found, or None if not found
+    """
+    if not start_dir:
+        start_dir = '.'
+    start_dir = os.path.abspath(start_dir)
+    cur_dir = start_dir
+    found = False
+    while cur_dir != None:
+        if os.path.basename(cur_dir) != 'defaults':
+            for cfile_name in CONFIG_FILE_NAMES:
+                if os.path.isfile('{}/{}'.format(cur_dir, cfile_name)):
+                    found = True
+                    break
+                if os.path.isfile('{}/defaults/{}'.format(cur_dir, cfile_name)):
+                    if os.path.isfile('{}/wizard'.format(cur_dir)):
+                        found = True
+                        break
+                    else:
+                        sys.stderr.write("Found '{cur_dir}/defaults/{cfile_name}' but no wizard found. Please pre-generate a config file: ({cfile_name}), or create a wizard that will do it for you so we can call it".format(cur_dir=cur_dir, cfile_name=cfile_name))
+                        sys.exit(1)
+            if found:
+                break
+        cur_dir = os.path.dirname(cur_dir)
+        if cur_dir == '/':
+            cur_dir = None
+    return cur_dir
+
+def load_json_config(config_path):
+    """
+    Load the json config file at 'config_path' and return the dict
+    """
+    config = {}
+    if os.path.isfile(config_path):
+        with open(config_path, 'r') as cfile:
+            config = json.load(cfile)
+    return config
+
+def logging_init(level):
+    """
+    Initialize and create initial LOGGER
+    level is a String of one of:
+        'trace'
+        'debug'
+        'info'
+        'warning'
+        'error'
+        'critical'
+        'notset'
+    Colorizing was combining multiple ideas in the answers from:
+        https://stackoverflow.com/q/384076
+    """
+    black, red, green, yellow, blue, magenta, cyan, white = range(8) # pylint: disable=unused-variable
+    level_colors = {
+        logging.WARNING  : 30 + yellow,
+        logging.INFO     : 30 + green,
+        logging.DEBUG    : 30 + white,
+        logging.CRITICAL : 30 + yellow,
+        logging.ERROR    : 40 + red
+    }
+    sequences = {
+        'reset': "\033[0m",
+        'color': "\033[1;%dm",
+        'bold' : "\033[1m"
+    }
+    #Initialize logging
+    try:
+        log_level = int(level)
+    except ValueError:
+        log_level = LOGGING_LEVELS[level.lower()]
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    #Setup ANSI coloring for the log level name
+    if platform.system() != 'Windows' and ISATTY:
+        for l_level in level_colors:
+            logging.addLevelName(
+                l_level,
+                "{bold}{color_seq}{level_name}{reset}".format(
+                    color_seq=sequences['color'] % level_colors[l_level],
+                    level_name=logging.getLevelName(l_level),
+                    **sequences
+                )
+            )
+
+def parse_docker_local_ports(docker_ports):
+    """
+    Take a docker publish port formatted string and return the local port
+
+    Args:
+        docker_ports: string representation of a docker port publish format
+
+    Returns:
+        The parsed local port string
+    """
+    if not isinstance(docker_ports, list):
+        port_split = docker_ports.split(':')
+    else:
+        port_split = docker_ports
+    if '/' in docker_ports:
+        proto = docker_ports.split('/')[1]
+    else:
+        proto = 'tcp'
+    try:
+        localport = int(port_split[0], base=10)
+        return "{}({})".format(localport, proto)
+    except ValueError:
+        port_range = port_split[0].split('-')
+        if len(port_range) != 2:
+            port_string_tail = parse_docker_local_ports(port_split[1:])
+            return "{}({})".format(port_string_tail, proto)
+        return "{}-{}({})".format(port_range[0], port_range[1], proto)
+
+def port_check(host, port, timeout=2):
+    """
+    Perform a basic socket connect to 'host' on 'port'.
+
+    Args:
+        host: String of the host/ip to connect to
+        port: integer of the port to connect to on 'host'
+        timeout: integer indicating timeout for connecting. Default=2
+
+    Returns:
+        Boolean whether the connection was successful or now
+    """
+    skt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    skt.settimeout(timeout)
+    try:
+        skt.connect((host, int(port)))
+        skt.shutdown(socket.SHUT_RDWR)
+        return True
+    except Exception: ##pylint: disable=broad-except
+        return False
+    finally:
+        skt.close()
+
+def update_component_images(components=None, logger=None):
+    """
+    Look through given components and try to build or pull new versions of the
+    image layers etc...
+
+    Args:
+        components: list, of components to use for finding images to update
+        logger: Logger object to use for log messages
+
+    Returns:
+        None
+    """
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('update_images')
+    log.debug('Looking up images being referenced in components')
+    needed_images = get_needed_images(components, logger=log)
+    ext_images = needed_images['external_images']['exists'] + needed_images['external_images']['missing']
+    int_images = needed_images['base_images']['exists'] + needed_images['base_images']['missing']
+    int_images += needed_images['runtime_images']['exists'] + needed_images['runtime_images']['missing']
+    log_output = True
+    log.info("Building/Updating devlab and project's managed images: '%s'", ','.join(int_images))
+    action_build(int_images, clean=True, pull=True)
+    for ext_image in ext_images:
+        log.info("Pulling down any updates to image: '%s'", ext_image)
+        pi_res = DOCKER.pull_image(ext_image, log_output=log_output, logger=log)
+        if pi_res[0] != 0:
+            log.error("Failed pulling updates for image: %s", ext_image)
+            sys.exit(1)
+
+def save_env_file(config_dict, dst_file, force_upper_keys=False):
+    """
+    This takes a simple, single level dict and tries to write it out to
+    'dst_file' in a bash style env file. For example:
+        {
+            'MY_VAR': 'hello',
+            'OTHER_VAR': 'world',
+            'lower_var': 'foobar'
+        }
+    Would become a file with the contents of:
+        MY_VAR="hello"
+        OTHER_VAR="world"
+        lower_var="foobar"
+    If force_upper_keys is set, then the key 'lower_var' would become LOWER_VAR
+    """
+    with open(dst_file, 'w') as dfile:
+        for key in config_dict:
+            val = config_dict[key]
+            if force_upper_keys:
+                key = key.upper()
+            if val in [True, False]:
+                val = str(val).lower()
+            else:
+                val = '"{}"'.format(val)
+            dfile.write('{}={}\n'.format(key, val))
+
+def set_default_action(args, subparser):
+    """
+    Look at the args passed and determine if there is a subparser action set for
+    it. If there is, then return the normal set of args. If NOT then append the
+    default 'none' action and return it.
+
+    This is primarily to get around a shortcoming in python2 :-|
+
+    Args:
+        args: list, of the args passed to the script
+
+    Returns:
+        list
+    """
+    action_exists = False
+    args_passed = list(args)
+    for action in subparser.choices:
+        if action in args_passed:
+            action_exists = True
+            break
+    if not action_exists:
+        args_passed.append('none')
+    return args_passed
+
+def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_output=False, log=None, user=None):
+    """
+    This takes a delvab script string, and executes it inside containers
+
+    Args:
+        script: string of the command. There are optional prefixes for the string:
+            PREFIXES:
+                'helper_container|<IMAGE_NAME^TAG^CONTAINER_NAME>: <SCRIPT>'
+                    This will execute the SCRIPT inside of a new container of
+                    IMAGE_NAME with TAG, with the name CONTAINER_NAME
+                'running_container|<CONTAINER>: <SCRIPT>'
+                    This will execute the SCRIPT inside of the already running
+                    CONTAINER
+        name: string of the name of the container that this script is related
+            to. So a script without a PREFIX, is run inside of this container
+            name.
+        ignore_nonzero_rc: bool indicating whether errors should create logs
+        interactive: bool, whether to run in "interactive" mode or not
+        log: Logger object that will be processing logs. Default=None
+
+    Returns:
+        tuple where:
+            First Element is the return code of the command
+            Second Element is either a list of str
+    """
+    script_org = script
+    if not log:
+        log = logging.getLogger("ScriptRunner-{}".format(name))
+    if script_org.startswith('helper_container|') or script.startswith('running_container|'):
+        script_pref = script.split(':')[0]
+        script_type = script_pref.split('|')[0]
+        name = script_pref.split('|')[1]
+        cimg = name
+        script = script[len(script_type)+2+len(cimg):]
+    script_split = [quote(script_arg) for script_arg in shlex.split(script)]
+    script_stripped = []
+    script_run_opts = []
+    if user:
+        script_run_opts.append('--user')
+        script_run_opts.append(user)
+        script_run_opts.append('--workdir')
+        script_run_opts.append('/root')
+    script_end_env = False
+    for script_arg in script_split:
+        if '=' in script_arg:
+            if not script_end_env:
+                log.debug("Found environment variable for script: '%s'", script_arg)
+                script_run_opts.append('-e')
+                script_run_opts.append(script_arg)
+                continue
+        script_stripped.append(script_arg)
+        script_end_env = True
+    log.debug("Full command, including environment variables: '%s'", script)
+    script_stripped = ' '.join(script_stripped)
+    if script_org.startswith('helper_container|'):
+        script_run_opts.insert(0, '--rm')
+        ctag = 'latest'
+        if '^' in cimg:
+            cimg_split = cimg.split('^')
+            cimg = cimg_split[0]
+            if cimg_split[1]:
+                ctag = cimg_split[1]
+            name = cimg
+            if len(cimg_split) > 2:
+                name = cimg_split[2]
+            log.debug("Found tag: %s for image: %s. Container name will be: %s", ctag, cimg, name)
+        log.info("Executing command: '%s' inside of new container: '%s', using image: '%s:%s'", script_stripped, name, cimg, ctag)
+        script_ret = DOCKER.run_container(
+            image='{}:{}'.format(cimg, ctag),
+            name=name,
+            network=CONFIG['network']['name'],
+            mounts=[
+                '{}:/devlab'.format(PROJ_ROOT)
+            ],
+            background=False,
+            interactive=interactive,
+            cmd=script_stripped,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            logger=log,
+            run_opts=script_run_opts,
+            log_output=log_output
+        )
+    else:
+        log.info("Executing command: '%s' inside of container: %s", script_stripped, name)
+        script_ret = DOCKER.exec_cmd(
+            name=name,
+            background=False,
+            interactive=interactive,
+            cmd=script_stripped,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            logger=log,
+            exec_opts=script_run_opts,
+            log_output=log_output
+        )
+    return script_ret
+
+##- Main -##
+#Check to see if we are attached to a TTY
+try:
+    ISATTY = sys.stdout.isatty()
+except AttributeError:
+    ISATTY = False
+
+PROJ_ROOT = get_proj_root()
+if __name__ == '__main__':
+    #Top level parser
+    PARSER = argparse.ArgumentParser(description='Main interface for devlab')
+    PARSER.add_argument('--log-level', '-l', choices=list(LOGGING_LEVELS.keys()), default='info', help='Set the log-level output')
+    PARSER.add_argument('--version', '-v', action='store_true', help='Display the version of devlab and exit')
+    PARSER.add_argument('--project-root', '-P', default=None, help='Force project root to a specific path instead of searching for DevlabConfig.json')
+    SUBPARSERS = PARSER.add_subparsers(help='Actions')
+
+    #Add Subparser for dummy default action
+    PARSER_DEFAULT = SUBPARSERS.add_parser('none')
+    PARSER_DEFAULT.set_defaults(func=action_default)
+
+    #Add Subparser for build action
+    PARSER_BUILD = SUBPARSERS.add_parser('build', help='Build docker images')
+    PARSER_BUILD.add_argument('images', nargs='*', choices=list(IMAGES.keys()) + get_runtime_images() + ['*'], default='*', help='Build the specific image or images. Leave empty for all(*)')
+    PARSER_BUILD.add_argument('--clean', '-c', action='store_true', help='Do a clean build, which will remove all images and then rebuild them')
+    PARSER_BUILD.add_argument('--no-cache', '-C', action='store_true', help='Don\'t use docker\'s cache when building')
+    PARSER_BUILD.add_argument('--pull', '-p', action='store_true', help='Try to pull the latest version of images during build')
+    PARSER_BUILD.set_defaults(func=action_build)
+
+    #Add Subparser for down action
+    PARSER_DOWN = SUBPARSERS.add_parser('down', help='Bring down components')
+    PARSER_DOWN.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Bring down the specific component(s)')
+    PARSER_DOWN.add_argument('--rm', '-r', action='store_true', help="Don't just bring the component down, but also delete the container")
+    PARSER_DOWN.set_defaults(func=action_down)
+
+    #Add Subparser for shell action
+    PARSER_SHELL = SUBPARSERS.add_parser('sh', help='Execute a shell command inside of a component/container')
+    PARSER_SHELL.add_argument('components', nargs='*', choices=get_components() + ['adhoc'], help='The component(s) where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components')
+    PARSER_SHELL.add_argument('--adhoc-image', '-i', default='devlab_helper', help='When using the \'adhoc\' component, use this image. [NOTE] This is overridden if --command is specified with \'helper_container|IMAGENAME: /bin/bash\' etc... DEFAULT: \'devlab_helper\'')
+    PARSER_SHELL.add_argument('--adhoc-name', '-n', default=None, help='When using the \'adhoc\' component, use this name for the container.')
+    PARSER_SHELL.add_argument('--command', '-c', nargs=argparse.REMAINDER, help='Optional command to run instead of an interactive shell')
+    PARSER_SHELL.add_argument('--user', '-u', default=None, help='Optional user to run the command/shell as')
+    PARSER_SHELL.set_defaults(func=action_shell)
+
+    #Add Subparser for reset action
+    PARSER_RESET = SUBPARSERS.add_parser('reset', help='Reset a specific component, getting rid of all data including persistent data. This is useful if you want to have a component start from scratch without re-running the wizard')
+    PARSER_RESET.add_argument('components', nargs='*', choices=get_components() + ['devlab', '*'], default='*', help='Reset the specific component(s). * means all components, but this does NOT inlcude \'devlab\'')
+    PARSER_RESET.add_argument('--reset-wizard', '-r', action='store_true', help='Also remove wizard related files so that the wizard will run again for the specified component')
+    PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS DEFINED IN in \'paths.reset_full\'!!')
+    PARSER_RESET.set_defaults(func=action_reset)
+
+    #Add Subparser for global_status action
+    PARSER_GLOBAL_STATUS = SUBPARSERS.add_parser('global-status', help='Get a global status of all environments where devlab has created containers')
+    PARSER_GLOBAL_STATUS.set_defaults(func=action_global_status)
+
+    #Add Subparser for status action
+    PARSER_STATUS = SUBPARSERS.add_parser('status', help='Get a status of the environment')
+    PARSER_STATUS.set_defaults(func=action_status)
+
+    #Add Subparser for up action
+    PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
+    PARSER_UP.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Bring up the specific component')
+    PARSER_UP.add_argument('--bind-to-host', '-b', action='store_true', help='Whether or not we should spin things up so that other systems on your host\'s network will be able to easily reach and work with the spun up components. This generally means if your host\'s IP changes, components will have to be reprovisioned')
+    PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any of the provisioning scripts')
+    PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
+    PARSER_UP.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones when bringing them "up"')
+    PARSER_UP.set_defaults(func=action_up)
+
+    # Add subparser for update action
+    PARSER_UPDATE = SUBPARSERS.add_parser('update', help='Update devlab to the latest released version')
+    PARSER_UPDATE.add_argument('--uninstall', '-U', action='store_true', help='Instead of updating using the installer, uninstall it')
+    PARSER_UPDATE.add_argument('--set-version', '-V', default=None, help='Update/Downgrade to a specific version of devlab')
+    PARSER_UPDATE.set_defaults(func=action_update)
+
+    # Add subparser for restart
+    PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
+    PARSER_RESTART.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Restart the specific component')
+    PARSER_RESTART.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones')
+    PARSER_RESTART.set_defaults(func=action_restart)
+
+    #Parse our args
+    ARGS = PARSER.parse_args(set_default_action(args=sys.argv[1:], subparser=SUBPARSERS))
+
+    if ARGS.version:
+        print('Version: {}'.format(__VERSION__))
+        sys.exit(0)
+
+    #Initialize logging:
+    logging_init(level=ARGS.log_level)
+    LOGGER = logging.getLogger("Main")
+
+    #The 'update' action is special and doesn't need all of the checks or a PROJ_ROOT etc..
+    #it also will exit after executing
+    if ARGS.func in [action_update, action_global_status, action_default]:
+        ARGS.func(**vars(ARGS))
+
+    if ARGS.project_root:
+        PROJ_ROOT = ARGS.project_root
+
+    if not PROJ_ROOT:
+        #Running Adhoc without a project won't get us a DockerHelper object.
+        #this will create one if none has been set.
+        if ARGS.func == action_shell and ARGS.components == ['adhoc']:
+            PROJ_ROOT = os.path.abspath('.')
+            DOCKER = DockerHelper(
+                labels=[
+                    'com.lab.type=devlab',
+                    'com.lab.project={}'.format(PROJ_ROOT)
+                ]
+            )
+            CONFIG = {
+                'network': {
+                    'name': None
+                }
+            }
+            # Run the adhoc function
+            ARGS.func(**vars(ARGS))
+            sys.exit(0)
+        else:
+            LOGGER.error("Aborting... could not determine project root. Please create a DevlabConfig.json")
+            sys.exit(1)
+
+    #Load config
+    CONFIG = get_config()
+
+    #If we're doing an 'up' action, check for and run wizard
+    if ARGS.func == action_up:
+        if CONFIG['wizard_enabled']:
+            if os.path.isfile('{}/wizard'.format(PROJ_ROOT)):
+                LOGGER.debug("Running wizard, in case it needs to be run")
+                WIZ_OUT = Command('{}/wizard'.format(PROJ_ROOT), interactive=True).run()
+                if WIZ_OUT[0] != 0:
+                    LOGGER.error("Wizard did not exit successfully... Aborting!")
+                    sys.exit(1)
+                CONFIG = get_config()
+            else:
+                LOGGER.warning("WARNING!!!!WARNING!!! No wizard found!!!")
+
+    #See if we have enough details in our config
+    if not CONFIG['components'] and 'foreground_component' not in CONFIG:
+        LOGGER.warning("No DevlabConfig.json was found yet.")
+        LOGGER.info("Trying to load from 'defaults/'")
+        CONFIG = get_config(fallback_default=True)
+        if not CONFIG['components']:
+            LOGGER.error("No configured components found!... aborting")
+            sys.exit(1)
+
+    #Create out DockerHelper Object
+    DOCKER = DockerHelper(
+        filter_label=CONFIG['project_filter'],
+        labels=[
+            'com.lab.type=devlab',
+            'com.lab.project={}'.format(PROJ_ROOT)
+        ],
+        common_domain=CONFIG['domain']
+    )
+
+    #Change directory to the root of the project
+    os.chdir(PROJ_ROOT)
+
+    #Run the action function
+    ARGS.func(**vars(ARGS))
