@@ -82,7 +82,7 @@ if [ "$RELEASE_ID" == 'null' -o -z "$RELEASE_ID" ] ; then
     exit 1
 fi
 
-for asset in $(find artifacts/ -type f) ; do 
+for asset in $(find artifacts/ -type f) ; do
     echo "=== Uploading: $asset ==="
     # deb: application/vnd.debian.binary-package
     # tar.gz: application/gzip
