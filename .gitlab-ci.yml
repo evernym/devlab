@@ -1,0 +1,48 @@
+---
+image: gitlab.corp.evernym.com:4567/te/ops-tools/debpackage-builder/bionic:latest
+
+.tags:
+  tags:
+    - docker-machine
+    - micro
+
+stages:
+  - test
+  - build
+  - deploy
+
+syntax:
+  stage: test
+  extends: .tags
+  script:
+    - python -m py_compile devlab
+    - python -m py_compile installer.py
+    - pylint devlab
+    - pylint installer.py
+
+make_pkg:
+  stage: build
+  extends: .tags
+  script:
+    - ci/build.sh
+  artifacts:
+    paths:
+      - artifacts/*
+    expire_in: 1 week
+
+create_new_release:
+  stage: deploy
+  extends: .tags
+  environment:
+    name: Github
+    url: https://github.com/evernym/devlab/releases
+  variables:
+    GITHUB_OWNER: evernym
+    GITHUB_REPO: devlab
+  script:
+    - ci/create_github_release.sh
+  dependencies:
+    - make_pkg
+  only:
+    - tags@te/devlab
+  when: on_success

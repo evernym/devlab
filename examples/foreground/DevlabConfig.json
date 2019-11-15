@@ -1,0 +1,53 @@
+{
+    "paths": {
+        "component_persistence": "persistent_data"
+    },
+    "domain": "dev.lab",
+    "project_filter": "lab.dev.example.type=devlab",
+    "wizard_enabled": false,
+    "components": {
+        "vault": {
+            "image": "vault:latest",
+            "enabled": true,
+            "cmd": "vault server -config /vault/config",
+            "run_opts": [
+                "-e","VAULT_LOCAL_CONFIG={\"backend\": {\"file\": {\"path\": \"/vault/file\"}}, \"disable_mlock\":true, \"listener\": {\"tcp\": {\"address\": \"0.0.0.0:8200\", \"tls_disable\":1}}"
+            ],
+            "ports": [
+                "8200:8200"
+            ],
+            "mounts": [
+                ":/devlab",
+                "persistent_data/vault/data:/vault/file"
+            ],
+            "post_up_scripts": [
+                "VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=ThisIsntARealThing /devlab/scripts/setup_vault.sh"
+            ],
+            "status_script": "/devlab/scripts/status_vault.sh",
+            "shell": "/bin/sh",
+            "ordinal": {
+                "group": 0,
+                "number": 1
+            },
+            "reset_paths": [
+                "data/",
+                "env",
+                "init.out",
+                "my_app_token.out"
+            ]
+        }
+    },
+    "foreground_component": {
+        "name": "my_app_vault",
+        "image": "devlab_helper",
+        "cmd": "/devlab/scripts/start_my_app.sh",
+        "mounts": [
+            ":/devlab"
+        ],
+        "status_script": "/devlab/scripts/status_my_app.sh",
+        "reset_paths": [
+            "config.yaml",
+            "app_data/"
+        ]
+    }
+}
