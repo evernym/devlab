@@ -542,7 +542,8 @@ class DockerHelper(object):
                 '--tmpfs=/run',
                 '--tmpfs=/run/lock',
                 '--tmpfs=/tmp',
-                '--volume=/sys/fs/cgroup:/sys/fs/cgroup:ro'
+                '--volume=/sys/fs/cgroup:/sys/fs/cgroup:ro',
+                '-t' #This is needed so that 'docker logs' will show systemd output
             ]
         if mounts:
             for mount in mounts:
