@@ -1150,7 +1150,7 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
         foreground_comp_name = config['foreground_component']['name']
     add_foreground = False
     components_to_reset = components
-    if not config['components']:
+    if not config['components'] and not foreground_comp_name:
         log.error("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
         sys.exit(1)
     if 'linux' in sys.platform.lower():
@@ -1252,9 +1252,10 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
         if comp == foreground_comp_name:
             log.info("Resetting files for foreground component: %s", foreground_comp_name)
             comp_config = config['foreground_component']
+            comp_config['enabled'] = True
         else:
             comp_config = config['components'][comp]
-        if config['components'][comp]['enabled']:
+        if comp_config['enabled']:
             action_down(components=[comp], rm=True)
         else:
             # Always reset wizard files for components that are disabled

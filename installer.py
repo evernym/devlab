@@ -45,7 +45,7 @@ PARSER = None
 ## Classes
 class FileIndexParser(HTMLParser, object): #pylint: disable=abstract-method
     """
-    Subclass of HTMLParser, for finding a tags with an href and adding them an
+    Subclass of HTMLParser, for finding tags with an href and adding them to an
     internal 'parsed' list attribute.
     """
     def __init__(self, *args, **kwargs):
@@ -290,6 +290,11 @@ def http_request(url, headers=None, payload=None, insecure=False, decode=True, l
         insecure: bool
             Optional flag to indicate whether certificate validation to the
             http server should happen.
+        decode: bool
+            Optional flag to indicat whether the string response should have
+            '.decode()' run on it. Default is True, but if binary data is
+            needed for later processing then setting to False is what you're
+            looking for
         logger:
             Optional logger object
     Returns Tuple

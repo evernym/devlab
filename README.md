@@ -27,7 +27,7 @@ There are three options for installing devlab:
 1. **Base Image**: An image that is included with, and managed by devlab
 1. **Runtime Image**: An image that is defined by, and managed by a project that uses devlab
 1. **Script Runner**: An internal reference to a string that can define a script/command to run including where (inside a new container, or an existing component). See [Script Runner Syntax](#script-runner-syntax) for more information.
-1. **Provision**: The act of setting up or completing the set up of a component through the use of scripts. See `pre_scripts` and `scripts` in [Component Config Structure](#component-config-structure)
+1. **Provision**: The act of setting up or completing the setup of a component through the use of scripts. See `pre_scripts` and `scripts` in [Component Config Structure](#component-config-structure)
 1. **Wizard**: A script that is run before the `up` action. After the wizard has been executed a proper [DevlabConfig.json](#devlab-configuration) should exist. It is normal for the wizard to result in more files than just a `DevlabConfig.json`, and those files can be added to the config so that devlab can reset the wizard (forcing it to run again) if so desired.
 
 # Usage
@@ -44,17 +44,17 @@ The format of the command should be:
 
 The "wizard" logic will be invoked the first time you run a `devlab up` command. This can be invoked separately with `wizard` if you so desire.
 
-You can jump right in with a `devlab up`
+You can jump right in with a project by going into the directory and running (Examples are in this repository under the `examples` directory): `devlab up`
 
 If you need to reset everything back to normal just: `devlab reset --full`
 
-*[NOTE]* This will also remove the files under `modules/` so if you have local modifications there, they will be erased with this.
+*[NOTE]* This will also remove the files defined `paths.reset_full` (See [Paths Config Structure](#paths-config-structure))
 
 If you just want to reset a single component: `devlab reset <component>`
 
-If you want to reset a component and force the wizard to run again for it: `devlab reset <component> --reset-wizard`
+If you want to reset a component so that a wizard may notice (depends on whatever wizard your project is using) and possibly force the wizard to run again for it: `devlab reset <component> --reset-wizard`
 
-If you want to reset the devab's configuration (which the wizard will likely notice and ask you which components to start back up): `devlab reset devlab`
+If you want to reset the devab's configuration: `devlab reset devlab`
 
 ## How does it do its thing?
 1. The first thing that happens is devlab looks to see if the action set, will need a configuration or not.
@@ -497,18 +497,23 @@ This will create a new container from the `ubuntu:18.04` image
 
 ### Reset action
 ```
+usage: devlab reset [-h] [--reset-wizard] [--full]
+                    [{my_app_vault,vault,devlab,*} [{my_app_vault,vault,devlab,*} ...]]
+
 positional arguments:
   {vault,my_app,devlab,*}
                         Reset the specific component(s). * means all
                         components, but this does NOT inlcude 'devlab'
 
 optional arguments:
-  -h, --help            show this help message and exit
-  --reset-wizard, -r    Also remove wizard related files so that the wizard
-                        will run again for the specified component
-  --full, -f            Remove all component specific files, wizard files, as
-                        well as devlab files AND the modules/ directory. BE
-                        CAREFUL IF YOU HAVE UN-PUSHED COMMITS IN THERE
+  -h, --help          show this help message and exit
+  --reset-wizard, -r  Also remove wizard related files so that the wizard will
+                      run again for the specified component
+  --full, -f          Remove all component specific files, wizard files, as
+                      well as devlab files AND potentially files you're
+                      working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS
+                      DEFINED IN in 'paths.reset_full'!!
+
 ```
 
 Example:
