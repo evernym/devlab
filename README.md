@@ -498,7 +498,7 @@ This will create a new container from the `ubuntu:18.04` image
 ### Reset action
 ```
 usage: devlab reset [-h] [--reset-wizard] [--full]
-                    [{devlab,*} [{devlab,*} ...]]
+                    [{my_app_vault,vault,devlab,*} [{my_app_vault,vault,devlab,*} ...]]
 
 positional arguments:
   {vault,my_app,devlab,*}
