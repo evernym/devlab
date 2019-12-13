@@ -1149,12 +1149,12 @@ def action_restart(components='*', update_images=False, **kwargs):
     log.info("Bringing components UP")
     action_up(components=components_to_restart, update_images=update_images)
 
-def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
+def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
     """
     Reset a component
 
     Args:
-        components: list of components to reset
+        targets: list of components/targets to reset
         reset_wizard: bool, Whether or not to remove files related with the
             wizard to allow the wizard to prompt for the component again
         full: bool, whether or not to completely reset everything, including
@@ -1170,7 +1170,15 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
     if 'foreground_component' in config:
         foreground_comp_name = config['foreground_component']['name']
     add_foreground = False
-    components_to_reset = components
+    if isinstance(targets, str):
+        targets = [targets]
+    if len(targets) == 1:
+        if isinstance(targets[0], list):
+            targets = targets[0]
+    if '*' in targets:
+        components_to_reset = get_components(filter_list=targets)
+    else:
+        components_to_reset = targets
     if not config['components'] and not foreground_comp_name:
         log.error("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
         sys.exit(1)
@@ -1197,11 +1205,12 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
                 cargs.append('--reset-wizard')
             if full:
                 cargs.append('--full')
-            if isinstance(components, list):
-                for carg in components:
-                    cargs.append("'{}'".format(carg))
             else:
-                cargs.append("'{}'".format(components))
+                if isinstance(targets, list):
+                    for carg in targets:
+                        cargs.append("'{}'".format(carg))
+                else:
+                    cargs.append("'{}'".format(targets))
             script_ret = DOCKER.run_container(
                 image='devlab_helper:latest',
                 name='devlab-reset',
@@ -1222,7 +1231,17 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
                 log.error('Execution of devlab reset command inside of container failed')
                 sys.exit(1)
             return
-    if components == '*' or '*' in components:
+    if isinstance(targets, str):
+        targets = [targets]
+    if len(targets) == 1:
+        if isinstance(targets[0], list):
+            targets = targets[0]
+    if '*' in targets:
+        components_to_reset = get_shell_components(filter_list=targets)
+    else:
+        components_to_reset = targets
+
+    if targets == '*' or '*' in targets:
         components_to_reset = get_components(enabled_only=False)
     else:
         if full:
@@ -2094,6 +2113,13 @@ def get_env_from_file(env_file):
                 conf[key] = val
     return conf
 
+def get_reset_components(filter_list):
+    """
+    Wrapper for get_components so that argparse can check against custome shell
+    specific virtual components
+    """
+    return get_components(filter_list=filter_list, virtual_components=('devlab',))
+
 def get_shell_components(filter_list):
     """
     Wrapper for get_components so that argparse can check against custome shell
@@ -2941,7 +2967,7 @@ if __name__ == '__main__':
 
     #Add Subparser for reset action
     PARSER_RESET = SUBPARSERS.add_parser('reset', help='Reset a specific component, getting rid of all data including persistent data. This is useful if you want to have a component start from scratch without re-running the wizard')
-    PARSER_RESET.add_argument('components', nargs='*', choices=get_components() + ['devlab', '*'], default='*', help='Reset the specific component(s). * means all components, but this does NOT inlcude \'devlab\'')
+    PARSER_RESET.add_argument('targets', nargs='*', default='*', type=get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(get_components() + ['devlab'])))
     PARSER_RESET.add_argument('--reset-wizard', '-r', action='store_true', help='Also remove wizard related files so that the wizard will run again for the specified component')
     PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS DEFINED IN in \'paths.reset_full\'!!')
     PARSER_RESET.set_defaults(func=action_reset)
