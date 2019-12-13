@@ -4,6 +4,7 @@
 Main script for managing the devlab environment stack
 """
 import argparse
+import fnmatch
 import fcntl
 import json
 import logging
@@ -80,6 +81,12 @@ __VERSION__ = 'master'
 class DevlabCommandError(Exception):
     """
     Exception class for Devlab Command class errors
+    """
+    pass
+
+class DevlabComponentError(Exception):
+    """
+    Exception class for dealing with components
     """
     pass
 
@@ -1345,12 +1352,17 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
     """
     ignored_args = kwargs
     log = logging.getLogger("Shell")
-    components_dst = components
-    if components == '*' or '*' in components:
-        components_dst = get_components()
+    if isinstance(components, str):
+        components = [ components ]
+    if '*' in components:
+        components_dst = get_shell_components(filter_list=components)
+    else:
+        components_dst = components
     if isinstance(command, list):
         command = ' '.join(command)
     config = get_config()
+    #Remove duplicates
+    components_dst = sorted(set(components_dst))
     for component in components_dst:
         if not command:
             try:
@@ -1372,26 +1384,37 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
                 adhoc_image = adhoc_image.replace(':', '^')
                 adhoc_image_split = adhoc_image.split('^')
                 adhoc_image = adhoc_image_split[0]
+                adhoc_host = None
                 if '.' in adhoc_image:
                     log.debug('Checking to see if adhoc image is pointing to a custom docker repo: %s', adhoc_image)
                     if is_valid_hostname(adhoc_image):
                         log.debug("Adhoc image appears to be using a custom docker repo with a valid hostname. Checking for custom port...")
+                        adhoc_host = adhoc_image
                         try:
                             next_slash_split = adhoc_image_split[1].split('/')
                             host_port_check = re.match(r'[0-9]{2,5}', next_slash_split[0])
                             if host_port_check:
                                 log.debug("Found custom port: %s", host_port_check.string)
-                                adhoc_image = '{}:{}/{}'.format(adhoc_image, host_port_check.string, '/'.join(next_slash_split[1:]))
+                                adhoc_host = '{}:{}'.format(adhoc_host, host_port_check.string)
+                                adhoc_image = '{}/{}'.format(adhoc_host, '/'.join(next_slash_split[1:]))
+                                log.debug("Adhoc real image is: %s", adhoc_image)
                                 adhoc_image_split[0] = adhoc_image
                                 del adhoc_image_split[1]
                         except IndexError:
                             pass
                 try:
                     adhoc_image_tag = adhoc_image_split[1]
+                    log.debug("Found custom tag for adhoc image: %s", adhoc_image_tag)
                 except IndexError:
                     adhoc_image_tag = 'latest'
+                    log.debug("No custom tag for adhoc image found, defaulting to 'latest'")
                 if not adhoc_name:
-                    adhoc_name = '{}-adhoc'.format(adhoc_image.replace('/', '_'))
+                    if adhoc_host:
+                        #Strip off the host part of the image for generating a more sane name
+                        adhoc_name = adhoc_image[len(adhoc_host):]
+                    else:
+                        adhoc_name = adhoc_image
+                    adhoc_name = '{}-adhoc'.format(adhoc_name.replace('/', '_').strip('_'))
                 command = 'helper_container|{}^{}^{}: {}'.format(adhoc_image, adhoc_image_tag, adhoc_name, command)
                 log.debug("Built adhoc command: '%s'", command)
         script_runner(command, '{}-devlab'.format(component), log=log, ignore_nonzero_rc=ignore_nonzero_rc, user=user)
@@ -2044,22 +2067,88 @@ def get_env_from_file(env_file):
                 conf[key] = val
     return conf
 
-def get_components(enabled_only=True):
+def get_shell_components(filter_list):
+    return get_components(filter_list=filter_list, virtual_components=('adhoc'))
+
+def get_components(filter_list=None, virtual_components=None, enabled_only=True, logger=None):
     """
     Try to list available components
+
+    Args:
+        filter_list:
+            List or String of component(s) or glob matches to filter out
+            desired components
+        virtual_components:
+            List of additional "allowed" components that aren't found in the
+            config and should not be filter out
+        enable_only:
+            Boolean whether to only include 'enabled' components ot not
+
+    Returns:
+        List of components, unless filter_list was a string and only one
+        components matches. Then the single string will be returned. This is
+        primarily useful for argparser doing it's checks.
+
     """
     config = get_config()
-    if 'components' not in config:
-        config = get_config(fallback_default=True)
-        if 'components' not in config:
-            return []
-    if enabled_only:
-        components = list(filter(lambda comp: config['components'][comp]['enabled'], config['components']))
+    all_components = []
+    components = []
+    filter_str = False
+    if logger:
+        log = logger
     else:
-        components = list(config['components'])
+        log = logging.getLogger('get_components')
+    log.debug("Looking up components")
+    if 'components' not in config:
+        log.debug("No 'components' has found in config, checking fallback default/ path")
+        config = get_config(fallback_default=True)
+    if 'components' in config:
+        log.debug("Found 'components' path")
+        if enabled_only:
+            log.debug("Only adding 'enabled' components to full list")
+            all_components = list(filter(lambda comp: config['components'][comp]['enabled'], config['components']))
+        else:
+            log.debug("Adding all components (whether enabled or not) to the full list")
+            all_components = list(config['components'])
     if 'foreground_component' in config:
-        components.append(config['foreground_component']['name'])
-    components.sort()
+        log.debug("Found a 'foreground_component', adding to the full list")
+        all_components.append(config['foreground_component']['name'])
+    if filter_list:
+        if isinstance(filter_list, str):
+            filter_str = True
+            filter_list = [ filter_list ]
+        else:
+            if len(filter_list) == 1:
+                if isinstance(filter_list[0], list):
+                    filter_list = filter_list[0]
+        log.debug("Comparing full list to filter_list: '%s'", ','.join(filter_list))
+        for filt in filter_list:
+            if filt in virtual_components:
+                log.debug("Adding '%s' ad a virtual component to filtered list", filt)
+                components.append(filt)
+                continue
+            comp_found = False
+            for a_comp in all_components:
+                if filt == a_comp:
+                    comp_found = True
+                elif fnmatch.fnmatch(a_comp, filt):
+                    comp_found = True
+                elif a_comp.startswith(filt):
+                    comp_found = True
+                else:
+                    continue
+                log.debug("Adding: '%s' component to filtered list", a_comp)
+                components.append(a_comp)
+            if not comp_found:
+                raise DevlabComponentError("Unknown component: '{}'".format(filt))
+    else:
+        log.debug("Adding known components to filtered list")
+        components = all_components
+    if len(components) == 1:
+        if filter_str == True:
+            components = components[0]
+    else:
+        components = sorted(set(components))
     return components
 
 def get_runtime_images():
@@ -2810,7 +2899,7 @@ if __name__ == '__main__':
 
     #Add Subparser for shell action
     PARSER_SHELL = SUBPARSERS.add_parser('sh', help='Execute a shell command inside of a component/container')
-    PARSER_SHELL.add_argument('components', nargs='*', choices=get_components() + ['adhoc'], help='The component(s) where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components')
+    PARSER_SHELL.add_argument('components', nargs='*', default='*', type=get_shell_components, help='The component(s) or globs where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components COMPONENTS: {}'.format(', '.join(get_components() + ['adhoc'])))
     PARSER_SHELL.add_argument('--adhoc-image', '-i', default='devlab_helper', help='When using the \'adhoc\' component, use this image. [NOTE] This is overridden if --command is specified with \'helper_container|IMAGENAME: /bin/bash\' etc... DEFAULT: \'devlab_helper\'')
     PARSER_SHELL.add_argument('--adhoc-name', '-n', default=None, help='When using the \'adhoc\' component, use this name for the container.')
     PARSER_SHELL.add_argument('--command', '-c', nargs=argparse.REMAINDER, help='Optional command to run instead of an interactive shell')
@@ -2854,7 +2943,11 @@ if __name__ == '__main__':
     PARSER_RESTART.set_defaults(func=action_restart)
 
     #Parse our args
-    ARGS = PARSER.parse_args(set_default_action(args=sys.argv[1:], subparser=SUBPARSERS))
+    try:
+        ARGS = PARSER.parse_args(set_default_action(args=sys.argv[1:], subparser=SUBPARSERS))
+    except DevlabComponentError as e:
+        print('ERROR during parsing of aguments: {}'.format(e))
+        sys.exit(1)
 
     if ARGS.version:
         print('Version: {}'.format(__VERSION__))
