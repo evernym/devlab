@@ -1353,7 +1353,7 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
     ignored_args = kwargs
     log = logging.getLogger("Shell")
     if isinstance(components, str):
-        components = [ components ]
+        components = [components]
     if len(components) == 1:
         if isinstance(components[0], list):
             components = components[0]
@@ -2074,7 +2074,11 @@ def get_env_from_file(env_file):
     return conf
 
 def get_shell_components(filter_list):
-    return get_components(filter_list=filter_list, virtual_components=('adhoc'))
+    """
+    Wrapper for get_components so that argparse can check against custome shell
+    specific virtual components
+    """
+    return get_components(filter_list=filter_list, virtual_components=('adhoc',))
 
 def get_components(filter_list=None, virtual_components=None, enabled_only=True, logger=None):
     """
@@ -2122,19 +2126,21 @@ def get_components(filter_list=None, virtual_components=None, enabled_only=True,
     if filter_list:
         if isinstance(filter_list, str):
             filter_str = True
-            filter_list = [ filter_list ]
+            filter_list = [filter_list]
         else:
             if len(filter_list) == 1:
                 if isinstance(filter_list[0], list):
                     filter_list = filter_list[0]
         log.debug("Comparing full list to filter_list: '%s'", ','.join(filter_list))
         for filt in filter_list:
-            if filt in virtual_components:
-                log.debug("Adding '%s' ad a virtual component to filtered list", filt)
-                components.append(filt)
-                continue
+            if virtual_components:
+                if filt in virtual_components:
+                    log.debug("Adding '%s' as a virtual component to filtered list", filt)
+                    components.append(filt)
+                    continue
             comp_found = False
             for a_comp in all_components:
+                log.debug("Checking component: %s against filter val: %s", a_comp, filt)
                 if filt == a_comp:
                     comp_found = True
                 elif fnmatch.fnmatch(a_comp, filt):
@@ -2151,7 +2157,7 @@ def get_components(filter_list=None, virtual_components=None, enabled_only=True,
         log.debug("Adding known components to filtered list")
         components = all_components
     if len(components) == 1:
-        if filter_str == True:
+        if filter_str:
             components = components[0]
     else:
         components = sorted(set(components))
@@ -2951,8 +2957,8 @@ if __name__ == '__main__':
     #Parse our args
     try:
         ARGS = PARSER.parse_args(set_default_action(args=sys.argv[1:], subparser=SUBPARSERS))
-    except DevlabComponentError as e:
-        print('ERROR during parsing of aguments: {}'.format(e))
+    except DevlabComponentError as exc:
+        print('ERROR during parsing of aguments: {}'.format(exc))
         sys.exit(1)
 
     if ARGS.version:
