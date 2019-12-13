@@ -1081,8 +1081,15 @@ def action_down(components='*', rm=False, **kwargs):
     components_to_stop = components
     config = get_config()
     foreground_comp_name = None
-    if components == '*' or '*' in components:
-        components_to_stop = get_components()
+    if isinstance(components, str):
+        components = [components]
+    if len(components) == 1:
+        if isinstance(components[0], list):
+            components = components[0]
+    if '*' in components:
+        components_to_stop = get_components(filter_list=components)
+    else:
+        components_to_stop = components
     log.debug("Getting current list of containers")
     containers = DOCKER.get_containers()[1]
     containers_dict = {}
@@ -2905,7 +2912,7 @@ if __name__ == '__main__':
 
     #Add Subparser for down action
     PARSER_DOWN = SUBPARSERS.add_parser('down', help='Bring down components')
-    PARSER_DOWN.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Bring down the specific component(s)')
+    PARSER_DOWN.add_argument('components', nargs='*', default='*', type=get_components, help='Bring down the specific component(s) or glob matches to bring down. COMPONENTS: {}'.format(', '.join(get_components())))
     PARSER_DOWN.add_argument('--rm', '-r', action='store_true', help="Don't just bring the component down, but also delete the container")
     PARSER_DOWN.set_defaults(func=action_down)
 
