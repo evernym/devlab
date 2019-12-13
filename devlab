@@ -1354,6 +1354,9 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
     log = logging.getLogger("Shell")
     if isinstance(components, str):
         components = [ components ]
+    if len(components) == 1:
+        if isinstance(components[0], list):
+            components = components[0]
     if '*' in components:
         components_dst = get_shell_components(filter_list=components)
     else:
@@ -1362,7 +1365,7 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
         command = ' '.join(command)
     config = get_config()
     #Remove duplicates
-    components_dst = sorted(set(components_dst))
+    components_dst = list(sorted(set(components_dst)))
     for component in components_dst:
         if not command:
             try:
@@ -1373,9 +1376,12 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
         if component != 'adhoc':
             log.debug("Getting current list of containers")
             containers = DOCKER.get_containers()[1]
+            containers_dict = {}
+            for container in containers:
+                containers_dict[container['name']] = container
             container_names = [cntr['name'] for cntr in containers]
             log.debug("Current list of containers: '%s'", ', '.join(container_names))
-            if '{}-devlab'.format(component) not in container_names:
+            if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
                 log.error("Component: %s is not currently running. Aborting", component)
                 sys.exit(1)
         else:
