@@ -1133,8 +1133,15 @@ def action_restart(components='*', update_images=False, **kwargs):
     log = logging.getLogger('Restart')
     components_to_restart = components
     rm = False
-    if components == '*' or '*' in components:
-        components_to_restart = get_components()
+    if isinstance(components, str):
+        components = [components]
+    if len(components) == 1:
+        if isinstance(components[0], list):
+            components = components[0]
+    if '*' in components:
+        components_to_restart = get_components(filter_list=components)
+    else:
+        components_to_restart = components
     if update_images:
         rm = True
     log.info("Bringing components DOWN")
@@ -1735,8 +1742,15 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         reprovisionable_components = config['reprovisionable_components']
     if 'foreground_component' in config:
         foreground_comp_name = config['foreground_component']['name']
-    if components == '*' or '*' in components:
-        components_to_run = get_components()
+    if isinstance(components, str):
+        components = [components]
+    if len(components) == 1:
+        if isinstance(components[0], list):
+            components = components[0]
+    if '*' in components:
+        components_to_run = get_shell_components(filter_list=components)
+    else:
+        components_to_run = components
     log.debug("Components passed: '%s', components_to_run: '%s'", components, components_to_run)
     for comp in components_to_run:
         if comp == foreground_comp_name:
@@ -2918,7 +2932,7 @@ if __name__ == '__main__':
 
     #Add Subparser for shell action
     PARSER_SHELL = SUBPARSERS.add_parser('sh', help='Execute a shell command inside of a component/container')
-    PARSER_SHELL.add_argument('components', nargs='*', default='*', type=get_shell_components, help='The component(s) or globs where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components COMPONENTS: {}'.format(', '.join(get_components() + ['adhoc'])))
+    PARSER_SHELL.add_argument('components', nargs='*', default='*', type=get_shell_components, help='The component(s) or globs where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components. COMPONENTS: {}'.format(', '.join(get_components() + ['adhoc'])))
     PARSER_SHELL.add_argument('--adhoc-image', '-i', default='devlab_helper', help='When using the \'adhoc\' component, use this image. [NOTE] This is overridden if --command is specified with \'helper_container|IMAGENAME: /bin/bash\' etc... DEFAULT: \'devlab_helper\'')
     PARSER_SHELL.add_argument('--adhoc-name', '-n', default=None, help='When using the \'adhoc\' component, use this name for the container.')
     PARSER_SHELL.add_argument('--command', '-c', nargs=argparse.REMAINDER, help='Optional command to run instead of an interactive shell')
@@ -2942,7 +2956,7 @@ if __name__ == '__main__':
 
     #Add Subparser for up action
     PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
-    PARSER_UP.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Bring up the specific component')
+    PARSER_UP.add_argument('components', nargs='*', default='*', type=get_components, help='Bring up the specific component(s) based on name or glob match. COMPONENTS: {}'.format(', '.join(get_components())))
     PARSER_UP.add_argument('--bind-to-host', '-b', action='store_true', help='Whether or not we should spin things up so that other systems on your host\'s network will be able to easily reach and work with the spun up components. This generally means if your host\'s IP changes, components will have to be reprovisioned')
     PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any of the provisioning scripts')
     PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
@@ -2957,7 +2971,7 @@ if __name__ == '__main__':
 
     # Add subparser for restart
     PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
-    PARSER_RESTART.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Restart the specific component')
+    PARSER_RESTART.add_argument('components', nargs='*', default='*', type=get_components, help='Stop and start a specific component(s) or glob match. COMPONENTS: {}'.format(', '.join(get_components())))
     PARSER_RESTART.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones')
     PARSER_RESTART.set_defaults(func=action_restart)
 
