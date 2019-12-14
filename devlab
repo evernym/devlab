@@ -1175,10 +1175,8 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
     if len(targets) == 1:
         if isinstance(targets[0], list):
             targets = targets[0]
-    if '*' in targets:
-        components_to_reset = get_components(filter_list=targets)
-    else:
-        components_to_reset = targets
+    components_to_reset = get_reset_components(targets)
+    all_components = get_reset_components('default')
     if not config['components'] and not foreground_comp_name:
         log.error("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
         sys.exit(1)
@@ -1205,12 +1203,11 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
                 cargs.append('--reset-wizard')
             if full:
                 cargs.append('--full')
+            if isinstance(targets, list):
+                for carg in targets:
+                    cargs.append("'{}'".format(carg))
             else:
-                if isinstance(targets, list):
-                    for carg in targets:
-                        cargs.append("'{}'".format(carg))
-                else:
-                    cargs.append("'{}'".format(targets))
+                cargs.append("'{}'".format(targets))
             script_ret = DOCKER.run_container(
                 image='devlab_helper:latest',
                 name='devlab-reset',
@@ -1231,19 +1228,7 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
                 log.error('Execution of devlab reset command inside of container failed')
                 sys.exit(1)
             return
-    if isinstance(targets, str):
-        targets = [targets]
-    if len(targets) == 1:
-        if isinstance(targets[0], list):
-            targets = targets[0]
-    if '*' in targets:
-        components_to_reset = get_shell_components(filter_list=targets)
-    else:
-        components_to_reset = targets
-
-    if targets == '*' or '*' in targets:
-        components_to_reset = get_components(enabled_only=False)
-    else:
+    if set(all_components) != set(components_to_reset):
         if full:
             log.error("You have passed specific components, in addition to --full. When using --full, ALL components are assumed")
             sys.exit(1)
@@ -2118,7 +2103,16 @@ def get_reset_components(filter_list):
     Wrapper for get_components so that argparse can check against custome shell
     specific virtual components
     """
-    return get_components(filter_list=filter_list, virtual_components=('devlab',))
+    match_virtual = True
+    if len(filter_list) == 1:
+        if filter_list[0] == 'default':
+            filter_list = ['*']
+            match_virtual = False
+    elif filter_list == 'default':
+        filter_list = ['*']
+        match_virtual = False
+    res = get_components(filter_list=filter_list, virtual_components=('devlab',), match_virtual=match_virtual)
+    return res
 
 def get_shell_components(filter_list):
     """
@@ -2127,7 +2121,7 @@ def get_shell_components(filter_list):
     """
     return get_components(filter_list=filter_list, virtual_components=('adhoc',))
 
-def get_components(filter_list=None, virtual_components=None, enabled_only=True, logger=None):
+def get_components(filter_list=None, virtual_components=None, enabled_only=True, match_virtual=False, logger=None):
     """
     Try to list available components
 
@@ -2170,6 +2164,9 @@ def get_components(filter_list=None, virtual_components=None, enabled_only=True,
     if 'foreground_component' in config:
         log.debug("Found a 'foreground_component', adding to the full list")
         all_components.append(config['foreground_component']['name'])
+    if virtual_components:
+        if match_virtual:
+            all_components += virtual_components
     if filter_list:
         if isinstance(filter_list, str):
             filter_str = True
@@ -2208,6 +2205,7 @@ def get_components(filter_list=None, virtual_components=None, enabled_only=True,
             components = components[0]
     else:
         components = sorted(set(components))
+    log.debug("Returning filtered components: %s", components)
     return components
 
 def get_runtime_images():
@@ -2931,6 +2929,7 @@ except AttributeError:
 
 PROJ_ROOT = get_proj_root()
 if __name__ == '__main__':
+    CUR_COMPONENTS = get_components()
     #Top level parser
     PARSER = argparse.ArgumentParser(description='Main interface for devlab')
     PARSER.add_argument('--log-level', '-l', choices=list(LOGGING_LEVELS.keys()), default='info', help='Set the log-level output')
@@ -2952,13 +2951,13 @@ if __name__ == '__main__':
 
     #Add Subparser for down action
     PARSER_DOWN = SUBPARSERS.add_parser('down', help='Bring down components')
-    PARSER_DOWN.add_argument('components', nargs='*', default='*', type=get_components, help='Bring down the specific component(s) or glob matches to bring down. COMPONENTS: {}'.format(', '.join(get_components())))
+    PARSER_DOWN.add_argument('components', nargs='*', default='*', type=get_components, help='Bring down the specific component(s) or glob matches to bring down. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_DOWN.add_argument('--rm', '-r', action='store_true', help="Don't just bring the component down, but also delete the container")
     PARSER_DOWN.set_defaults(func=action_down)
 
     #Add Subparser for shell action
     PARSER_SHELL = SUBPARSERS.add_parser('sh', help='Execute a shell command inside of a component/container')
-    PARSER_SHELL.add_argument('components', nargs='*', default='*', type=get_shell_components, help='The component(s) or globs where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components. COMPONENTS: {}'.format(', '.join(get_components() + ['adhoc'])))
+    PARSER_SHELL.add_argument('components', nargs='*', default='*', type=get_shell_components, help='The component(s) or globs where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS + ['adhoc'])))
     PARSER_SHELL.add_argument('--adhoc-image', '-i', default='devlab_helper', help='When using the \'adhoc\' component, use this image. [NOTE] This is overridden if --command is specified with \'helper_container|IMAGENAME: /bin/bash\' etc... DEFAULT: \'devlab_helper\'')
     PARSER_SHELL.add_argument('--adhoc-name', '-n', default=None, help='When using the \'adhoc\' component, use this name for the container.')
     PARSER_SHELL.add_argument('--command', '-c', nargs=argparse.REMAINDER, help='Optional command to run instead of an interactive shell')
@@ -2967,7 +2966,7 @@ if __name__ == '__main__':
 
     #Add Subparser for reset action
     PARSER_RESET = SUBPARSERS.add_parser('reset', help='Reset a specific component, getting rid of all data including persistent data. This is useful if you want to have a component start from scratch without re-running the wizard')
-    PARSER_RESET.add_argument('targets', nargs='*', default='*', type=get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(get_components() + ['devlab'])))
+    PARSER_RESET.add_argument('targets', nargs='*', default='default', type=get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(CUR_COMPONENTS + ['devlab'])))
     PARSER_RESET.add_argument('--reset-wizard', '-r', action='store_true', help='Also remove wizard related files so that the wizard will run again for the specified component')
     PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS DEFINED IN in \'paths.reset_full\'!!')
     PARSER_RESET.set_defaults(func=action_reset)
@@ -2982,7 +2981,7 @@ if __name__ == '__main__':
 
     #Add Subparser for up action
     PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
-    PARSER_UP.add_argument('components', nargs='*', default='*', type=get_components, help='Bring up the specific component(s) based on name or glob match. COMPONENTS: {}'.format(', '.join(get_components())))
+    PARSER_UP.add_argument('components', nargs='*', default='*', type=get_components, help='Bring up the specific component(s) based on name or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_UP.add_argument('--bind-to-host', '-b', action='store_true', help='Whether or not we should spin things up so that other systems on your host\'s network will be able to easily reach and work with the spun up components. This generally means if your host\'s IP changes, components will have to be reprovisioned')
     PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any of the provisioning scripts')
     PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
@@ -2997,7 +2996,7 @@ if __name__ == '__main__':
 
     # Add subparser for restart
     PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
-    PARSER_RESTART.add_argument('components', nargs='*', default='*', type=get_components, help='Stop and start a specific component(s) or glob match. COMPONENTS: {}'.format(', '.join(get_components())))
+    PARSER_RESTART.add_argument('components', nargs='*', default='*', type=get_components, help='Stop and start a specific component(s) or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_RESTART.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones')
     PARSER_RESTART.set_defaults(func=action_restart)
 
