@@ -452,11 +452,15 @@ This will stop the containers that are part of the environment and remove them
 
 ### Sh action
 ```
+usage: devlab sh [-h] [--adhoc-image ADHOC_IMAGE] [--adhoc-name ADHOC_NAME]
+                 [--command ...] [--user USER]
+                 [components [components ...]]
+
 positional arguments:
-  {vault,my_app}
-                        The component(s) where the shell/command should be
-                        run. If more than one component is specified the
-                        command will be run sequentially across the components
+  components            The component(s) or globs where the shell/command
+                        should be run. If more than one component is specified
+                        the command will be run sequentially across the
+                        components. COMPONENTS: my_app_vault, vault, adhoc
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -497,13 +501,12 @@ This will create a new container from the `ubuntu:18.04` image
 
 ### Reset action
 ```
-usage: devlab reset [-h] [--reset-wizard] [--full]
-                    [{my_app_vault,vault,devlab,*} [{my_app_vault,vault,devlab,*} ...]]
+usage: devlab reset [-h] [--reset-wizard] [--full] [targets [targets ...]]
 
 positional arguments:
-  {vault,my_app,devlab,*}
-                        Reset the specific component(s). * means all
-                        components, but this does NOT inlcude 'devlab'
+  targets             Reset the specific target(s) or glob matches. * means
+                      all components, but this does NOT inlcude other targets
+                      like 'devlab'. TARGETS: my_app_vault, vault, devlab
 
 optional arguments:
   -h, --help          show this help message and exit
@@ -513,8 +516,13 @@ optional arguments:
                       well as devlab files AND potentially files you're
                       working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS
                       DEFINED IN in 'paths.reset_full'!!
-
 ```
+
+This action can also take some special "targets". Currently there is just `devlab` which will reset the files defined in the DevlabConfig file under `paths.reset_paths`. See also: [Paths Config Structure](#paths-config-structure)
+
+In the future there may be other targets, like `docker` etc...
+
+NOTE: A standard `devlab reset` only selects components and no additional targets like `devlab`. However if you forcefully put a '*' in it will successfully match against any target. So `devlab reset '*'` will get all components as well as the `devlab` target. 
 
 Example:
 `devlab reset -r vault`
@@ -527,10 +535,11 @@ This will reset the devlab back to a state as if the wizard was never run and th
 
 ### Restart action
 ```
-usage: devlab restart [-h] [--update-images] [{*} [{*} ...]]
+usage: devlab restart [-h] [--update-images] [components [components ...]]
 
 positional arguments:
-  {vault,my_app,*}                  Restart the specific component
+  components           Stop and start a specific component(s) or glob match.
+                       COMPONENTS: my_app_vault, vault
 
 optional arguments:
   -h, --help           show this help message and exit
@@ -569,11 +578,12 @@ This brings a component or stack of components up, as well as any provisioning s
 
 ```
 usage: devlab up [-h] [--bind-to-host] [--skip-provision] [--keep-up-on-error]
-                 [{*} [{*} ...]]
+                 [--update-images]
+                 [components [components ...]]
 
 positional arguments:
-  {vault,my_app,*}
-                        Bring up the specific component
+  components            Bring up the specific component(s) based on name or
+                        glob match. COMPONENTS: my_app_vault, vault
 
 optional arguments:
   -h, --help            show this help message and exit
