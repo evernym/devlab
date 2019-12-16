@@ -1083,9 +1083,7 @@ def action_down(components='*', rm=False, **kwargs):
     foreground_comp_name = None
     if isinstance(components, str):
         components = [components]
-    if len(components) == 1:
-        if isinstance(components[0], list):
-            components = components[0]
+    unnest_list(components)
     if '*' in components:
         components_to_stop = get_components(filter_list=components)
     else:
@@ -1135,9 +1133,7 @@ def action_restart(components='*', update_images=False, **kwargs):
     rm = False
     if isinstance(components, str):
         components = [components]
-    if len(components) == 1:
-        if isinstance(components[0], list):
-            components = components[0]
+    unnest_list(components)
     if '*' in components:
         components_to_restart = get_components(filter_list=components)
     else:
@@ -1151,7 +1147,7 @@ def action_restart(components='*', update_images=False, **kwargs):
 
 def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
     """
-    Reset a component
+    Reset a component/target
 
     Args:
         targets: list of components/targets to reset
@@ -1172,9 +1168,11 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
     add_foreground = False
     if isinstance(targets, str):
         targets = [targets]
-    if len(targets) == 1:
-        if isinstance(targets[0], list):
-            targets = targets[0]
+    unnest_list(targets)
+    if '*' in targets:
+        components_to_reset = get_components(filter_list=targets)
+    else:
+        components_to_reset = targets
     components_to_reset = get_reset_components(targets)
     all_components = get_reset_components('default')
     if not config['components'] and not foreground_comp_name:
@@ -1372,9 +1370,7 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
     log = logging.getLogger("Shell")
     if isinstance(components, str):
         components = [components]
-    if len(components) == 1:
-        if isinstance(components[0], list):
-            components = components[0]
+    unnest_list(components)
     if '*' in components:
         components_dst = get_shell_components(filter_list=components)
     else:
@@ -1748,9 +1744,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         foreground_comp_name = config['foreground_component']['name']
     if isinstance(components, str):
         components = [components]
-    if len(components) == 1:
-        if isinstance(components[0], list):
-            components = components[0]
+    unnest_list(components)
     if '*' in components:
         components_to_run = get_shell_components(filter_list=components)
     else:
@@ -2701,6 +2695,24 @@ def port_check(host, port, timeout=2):
         return False
     finally:
         skt.close()
+
+def unnest_list(to_unnest, sort=True):
+    """
+    Take a potential list of lists of strings and convert to a single list of strings
+
+    Args:
+        to_unnest: list to work on
+
+    Returns:
+        None (the list passed it modified in-place)
+    """
+    # Make sure that if nested list is passed we unwrap them
+    for nst in list(to_unnest):
+        if isinstance(nst, list):
+            to_unnest += nst
+            to_unnest.remove(nst)
+    if sort:
+        to_unnest = sorted(set(to_unnest))
 
 def update_component_images(components=None, logger=None):
     """
