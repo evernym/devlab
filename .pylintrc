@@ -51,7 +51,8 @@ confidence=
 # no Warning level messages displayed, use"--disable=all --enable=classes
 # --disable=W"
 disable=line-too-long,
-        global-statement
+        global-statement,
+        too-many-lines
 
 [BASIC]
 
@@ -84,7 +85,7 @@ max-args=12
 max-attributes=20
 
 # Maximum number of branch for function / method body
-max-branches=60
+max-branches=70
 
 #Maximum number of local variables for function / method
 max-locals=50
@@ -96,4 +97,4 @@ max-statements=200
 max-nested-blocks=15
 
 # Maximum module length
-max-module-lines=3000
+#max-module-lines=3000

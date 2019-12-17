@@ -4,6 +4,7 @@
 Main script for managing the devlab environment stack
 """
 import argparse
+import fnmatch
 import fcntl
 import json
 import logging
@@ -80,6 +81,12 @@ __VERSION__ = 'master'
 class DevlabCommandError(Exception):
     """
     Exception class for Devlab Command class errors
+    """
+    pass
+
+class DevlabComponentError(Exception):
+    """
+    Exception class for dealing with components
     """
     pass
 
@@ -1074,8 +1081,13 @@ def action_down(components='*', rm=False, **kwargs):
     components_to_stop = components
     config = get_config()
     foreground_comp_name = None
-    if components == '*' or '*' in components:
-        components_to_stop = get_components()
+    if isinstance(components, str):
+        components = [components]
+    unnest_list(components)
+    if '*' in components:
+        components_to_stop = get_components(filter_list=components)
+    else:
+        components_to_stop = components
     log.debug("Getting current list of containers")
     containers = DOCKER.get_containers()[1]
     containers_dict = {}
@@ -1119,8 +1131,13 @@ def action_restart(components='*', update_images=False, **kwargs):
     log = logging.getLogger('Restart')
     components_to_restart = components
     rm = False
-    if components == '*' or '*' in components:
-        components_to_restart = get_components()
+    if isinstance(components, str):
+        components = [components]
+    unnest_list(components)
+    if '*' in components:
+        components_to_restart = get_components(filter_list=components)
+    else:
+        components_to_restart = components
     if update_images:
         rm = True
     log.info("Bringing components DOWN")
@@ -1128,12 +1145,12 @@ def action_restart(components='*', update_images=False, **kwargs):
     log.info("Bringing components UP")
     action_up(components=components_to_restart, update_images=update_images)
 
-def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
+def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
     """
-    Reset a component
+    Reset a component/target
 
     Args:
-        components: list of components to reset
+        targets: list of components/targets to reset
         reset_wizard: bool, Whether or not to remove files related with the
             wizard to allow the wizard to prompt for the component again
         full: bool, whether or not to completely reset everything, including
@@ -1149,7 +1166,15 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
     if 'foreground_component' in config:
         foreground_comp_name = config['foreground_component']['name']
     add_foreground = False
-    components_to_reset = components
+    if isinstance(targets, str):
+        targets = [targets]
+    unnest_list(targets)
+    if '*' in targets:
+        components_to_reset = get_components(filter_list=targets)
+    else:
+        components_to_reset = targets
+    components_to_reset = get_reset_components(targets)
+    all_components = get_reset_components('default')
     if not config['components'] and not foreground_comp_name:
         log.error("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
         sys.exit(1)
@@ -1176,11 +1201,11 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
                 cargs.append('--reset-wizard')
             if full:
                 cargs.append('--full')
-            if isinstance(components, list):
-                for carg in components:
+            if isinstance(targets, list):
+                for carg in targets:
                     cargs.append("'{}'".format(carg))
             else:
-                cargs.append("'{}'".format(components))
+                cargs.append("'{}'".format(targets))
             script_ret = DOCKER.run_container(
                 image='devlab_helper:latest',
                 name='devlab-reset',
@@ -1201,9 +1226,7 @@ def action_reset(components='*', reset_wizard=False, full=False, **kwargs):
                 log.error('Execution of devlab reset command inside of container failed')
                 sys.exit(1)
             return
-    if components == '*' or '*' in components:
-        components_to_reset = get_components(enabled_only=False)
-    else:
+    if set(all_components) != set(components_to_reset):
         if full:
             log.error("You have passed specific components, in addition to --full. When using --full, ALL components are assumed")
             sys.exit(1)
@@ -1345,12 +1368,18 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
     """
     ignored_args = kwargs
     log = logging.getLogger("Shell")
-    components_dst = components
-    if components == '*' or '*' in components:
-        components_dst = get_components()
+    if isinstance(components, str):
+        components = [components]
+    unnest_list(components)
+    if '*' in components:
+        components_dst = get_shell_components(filter_list=components)
+    else:
+        components_dst = components
     if isinstance(command, list):
         command = ' '.join(command)
     config = get_config()
+    #Remove duplicates
+    components_dst = list(sorted(set(components_dst)))
     for component in components_dst:
         if not command:
             try:
@@ -1361,9 +1390,12 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
         if component != 'adhoc':
             log.debug("Getting current list of containers")
             containers = DOCKER.get_containers()[1]
+            containers_dict = {}
+            for container in containers:
+                containers_dict[container['name']] = container
             container_names = [cntr['name'] for cntr in containers]
             log.debug("Current list of containers: '%s'", ', '.join(container_names))
-            if '{}-devlab'.format(component) not in container_names:
+            if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
                 log.error("Component: %s is not currently running. Aborting", component)
                 sys.exit(1)
         else:
@@ -1372,12 +1404,37 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
                 adhoc_image = adhoc_image.replace(':', '^')
                 adhoc_image_split = adhoc_image.split('^')
                 adhoc_image = adhoc_image_split[0]
+                adhoc_host = None
+                if '.' in adhoc_image:
+                    log.debug('Checking to see if adhoc image is pointing to a custom docker repo: %s', adhoc_image)
+                    if is_valid_hostname(adhoc_image):
+                        log.debug("Adhoc image appears to be using a custom docker repo with a valid hostname. Checking for custom port...")
+                        adhoc_host = adhoc_image
+                        try:
+                            next_slash_split = adhoc_image_split[1].split('/')
+                            host_port_check = re.match(r'[0-9]{2,5}', next_slash_split[0])
+                            if host_port_check:
+                                log.debug("Found custom port: %s", host_port_check.string)
+                                adhoc_host = '{}:{}'.format(adhoc_host, host_port_check.string)
+                                adhoc_image = '{}/{}'.format(adhoc_host, '/'.join(next_slash_split[1:]))
+                                log.debug("Adhoc real image is: %s", adhoc_image)
+                                adhoc_image_split[0] = adhoc_image
+                                del adhoc_image_split[1]
+                        except IndexError:
+                            pass
                 try:
                     adhoc_image_tag = adhoc_image_split[1]
+                    log.debug("Found custom tag for adhoc image: %s", adhoc_image_tag)
                 except IndexError:
                     adhoc_image_tag = 'latest'
+                    log.debug("No custom tag for adhoc image found, defaulting to 'latest'")
                 if not adhoc_name:
-                    adhoc_name = '{}-adhoc'.format(adhoc_image.replace('/', '_'))
+                    if adhoc_host:
+                        #Strip off the host part of the image for generating a more sane name
+                        adhoc_name = adhoc_image[len(adhoc_host):]
+                    else:
+                        adhoc_name = adhoc_image
+                    adhoc_name = '{}-adhoc'.format(adhoc_name.replace('/', '_').strip('_'))
                 command = 'helper_container|{}^{}^{}: {}'.format(adhoc_image, adhoc_image_tag, adhoc_name, command)
                 log.debug("Built adhoc command: '%s'", command)
         script_runner(command, '{}-devlab'.format(component), log=log, ignore_nonzero_rc=ignore_nonzero_rc, user=user)
@@ -1685,8 +1742,13 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         reprovisionable_components = config['reprovisionable_components']
     if 'foreground_component' in config:
         foreground_comp_name = config['foreground_component']['name']
-    if components == '*' or '*' in components:
-        components_to_run = get_components()
+    if isinstance(components, str):
+        components = [components]
+    unnest_list(components)
+    if '*' in components:
+        components_to_run = get_shell_components(filter_list=components)
+    else:
+        components_to_run = components
     log.debug("Components passed: '%s', components_to_run: '%s'", components, components_to_run)
     for comp in components_to_run:
         if comp == foreground_comp_name:
@@ -2030,22 +2092,114 @@ def get_env_from_file(env_file):
                 conf[key] = val
     return conf
 
-def get_components(enabled_only=True):
+def get_reset_components(filter_list):
+    """
+    Wrapper for get_components so that argparse can check against custome shell
+    specific virtual components
+    """
+    match_virtual = True
+    if len(filter_list) == 1:
+        if filter_list[0] == 'default':
+            filter_list = ['*']
+            match_virtual = False
+    elif filter_list == 'default':
+        filter_list = ['*']
+        match_virtual = False
+    res = get_components(filter_list=filter_list, virtual_components=('devlab',), match_virtual=match_virtual)
+    return res
+
+def get_shell_components(filter_list):
+    """
+    Wrapper for get_components so that argparse can check against custome shell
+    specific virtual components
+    """
+    return get_components(filter_list=filter_list, virtual_components=('adhoc',))
+
+def get_components(filter_list=None, virtual_components=None, enabled_only=True, match_virtual=False, logger=None):
     """
     Try to list available components
+
+    Args:
+        filter_list:
+            List or String of component(s) or glob matches to filter out
+            desired components
+        virtual_components:
+            List of additional "allowed" components that aren't found in the
+            config and should not be filter out
+        enable_only:
+            Boolean whether to only include 'enabled' components ot not
+
+    Returns:
+        List of components, unless filter_list was a string and only one
+        components matches. Then the single string will be returned. This is
+        primarily useful for argparser doing it's checks.
+
     """
     config = get_config()
-    if 'components' not in config:
-        config = get_config(fallback_default=True)
-        if 'components' not in config:
-            return []
-    if enabled_only:
-        components = list(filter(lambda comp: config['components'][comp]['enabled'], config['components']))
+    all_components = []
+    components = []
+    filter_str = False
+    if logger:
+        log = logger
     else:
-        components = list(config['components'])
+        log = logging.getLogger('get_components')
+    log.debug("Looking up components")
+    if 'components' not in config:
+        log.debug("No 'components' has found in config, checking fallback default/ path")
+        config = get_config(fallback_default=True)
+    if 'components' in config:
+        log.debug("Found 'components' path")
+        if enabled_only:
+            log.debug("Only adding 'enabled' components to full list")
+            all_components = list(filter(lambda comp: config['components'][comp]['enabled'], config['components']))
+        else:
+            log.debug("Adding all components (whether enabled or not) to the full list")
+            all_components = list(config['components'])
     if 'foreground_component' in config:
-        components.append(config['foreground_component']['name'])
-    components.sort()
+        log.debug("Found a 'foreground_component', adding to the full list")
+        all_components.append(config['foreground_component']['name'])
+    if virtual_components:
+        if match_virtual:
+            all_components += virtual_components
+    if filter_list:
+        if isinstance(filter_list, str):
+            filter_str = True
+            filter_list = [filter_list]
+        else:
+            if len(filter_list) == 1:
+                if isinstance(filter_list[0], list):
+                    filter_list = filter_list[0]
+        log.debug("Comparing full list to filter_list: '%s'", ','.join(filter_list))
+        for filt in filter_list:
+            if virtual_components:
+                if filt in virtual_components:
+                    log.debug("Adding '%s' as a virtual component to filtered list", filt)
+                    components.append(filt)
+                    continue
+            comp_found = False
+            for a_comp in all_components:
+                log.debug("Checking component: %s against filter val: %s", a_comp, filt)
+                if filt == a_comp:
+                    comp_found = True
+                elif fnmatch.fnmatch(a_comp, filt):
+                    comp_found = True
+                elif a_comp.startswith(filt):
+                    comp_found = True
+                else:
+                    continue
+                log.debug("Adding: '%s' component to filtered list", a_comp)
+                components.append(a_comp)
+            if not comp_found:
+                raise DevlabComponentError("Unknown component: '{}'".format(filt))
+    else:
+        log.debug("Adding known components to filtered list")
+        components = all_components
+    if len(components) == 1:
+        if filter_str:
+            components = components[0]
+    else:
+        components = sorted(set(components))
+    log.debug("Returning filtered components: %s", components)
     return components
 
 def get_runtime_images():
@@ -2411,6 +2565,28 @@ def get_proj_root(start_dir=None):
             cur_dir = None
     return cur_dir
 
+def is_valid_hostname(hostname):
+    """
+    Takes a hostname and tries to determine if it is valid or not
+
+    Args:
+        hostname: String of the hostname to check
+
+    Returns:
+        Boolean if it is valid or not
+    """
+    # Borrowed from https://stackoverflow.com/questions/2532053/validate-a-hostname-string
+    if len(hostname) > 255:
+        return False
+    if hostname.endswith("."): # A single trailing dot is legal
+        hostname = hostname[:-1] # strip exactly one dot from the right, if present
+    disallowed = re.compile(r"[^A-Z\d-]", re.IGNORECASE)
+    return all( # Split by labels and verify individually
+        (label and len(label) <= 63 # length is within proper range
+         and not label.startswith("-") and not label.endswith("-") # no bordering hyphens
+         and not disallowed.search(label)) # contains only legal characters
+        for label in hostname.split("."))
+
 def load_json_config(config_path):
     """
     Load the json config file at 'config_path' and return the dict
@@ -2520,6 +2696,24 @@ def port_check(host, port, timeout=2):
     finally:
         skt.close()
 
+def unnest_list(to_unnest, sort=True):
+    """
+    Take a potential list of lists of strings and convert to a single list of strings
+
+    Args:
+        to_unnest: list to work on
+
+    Returns:
+        None (the list passed it modified in-place)
+    """
+    # Make sure that if nested list is passed we unwrap them
+    for nst in list(to_unnest):
+        if isinstance(nst, list):
+            to_unnest += nst
+            to_unnest.remove(nst)
+    if sort:
+        to_unnest = sorted(set(to_unnest))
+
 def update_component_images(components=None, logger=None):
     """
     Look through given components and try to build or pull new versions of the
@@ -2626,15 +2820,14 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
             First Element is the return code of the command
             Second Element is either a list of str
     """
-    script_org = script
     if not log:
         log = logging.getLogger("ScriptRunner-{}".format(name))
-    if script_org.startswith('helper_container|') or script.startswith('running_container|'):
-        script_pref = script.split(':')[0]
-        script_type = script_pref.split('|')[0]
-        name = script_pref.split('|')[1]
-        cimg = name
-        script = script[len(script_type)+2+len(cimg):]
+    script_parse = script_runner_parse(script)
+    cimg = script_parse['cimg']
+    if script_parse['name']:
+        name = script_parse['name']
+    script = script_parse['script']
+    script_mode = script_parse['mode']
     script_split = [quote(script_arg) for script_arg in shlex.split(script)]
     script_stripped = []
     script_run_opts = []
@@ -2655,7 +2848,7 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
         script_end_env = True
     log.debug("Full command, including environment variables: '%s'", script)
     script_stripped = ' '.join(script_stripped)
-    if script_org.startswith('helper_container|'):
+    if script_mode == 'helper_container':
         script_run_opts.insert(0, '--rm')
         ctag = 'latest'
         if '^' in cimg:
@@ -2697,6 +2890,48 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
         )
     return script_ret
 
+def script_runner_parse(script):
+    """
+    Take a script runner syntax and split it depending on mode etc... if needed
+
+    Args:
+        script: String in the format of a script runner syntax
+
+    Returns:
+        Dict of the results
+    """
+    parts_dict = {
+        'cimg': '',
+        'name': '',
+        'script': script,
+        'mode': ''
+    }
+    if script.startswith('helper_container|') or script.startswith('running_container|'):
+        #Strip off the mode
+        script_mode_split = script.split('|')
+        parts_dict['mode'] = script_mode_split.pop(0)
+        #Recombine script with the mode stripped off
+        script = '|'.join(script_mode_split)
+        #Find image
+        script_split = script.split(':')
+        name = script_split[0]
+        if '.' in name:
+            if is_valid_hostname(name):
+                try:
+                    next_slash_split = script_split[1].split('/')
+                    host_port_check = re.match(r'[0-9]{2,}', next_slash_split[0])
+                    if host_port_check:
+                        name = '{}:{}/{}'.format(name, host_port_check.string, '/'.join(next_slash_split[1:]))
+                        script_split[0] = name
+                        del script_split[1]
+                        script = ':'.join(script_split)
+                except IndexError:
+                    pass
+        parts_dict['name'] = name
+        parts_dict['cimg'] = name
+        parts_dict['script'] = script[2+len(name):].strip()
+    return parts_dict
+
 ##- Main -##
 #Check to see if we are attached to a TTY
 try:
@@ -2706,6 +2941,7 @@ except AttributeError:
 
 PROJ_ROOT = get_proj_root()
 if __name__ == '__main__':
+    CUR_COMPONENTS = get_components()
     #Top level parser
     PARSER = argparse.ArgumentParser(description='Main interface for devlab')
     PARSER.add_argument('--log-level', '-l', choices=list(LOGGING_LEVELS.keys()), default='info', help='Set the log-level output')
@@ -2727,13 +2963,13 @@ if __name__ == '__main__':
 
     #Add Subparser for down action
     PARSER_DOWN = SUBPARSERS.add_parser('down', help='Bring down components')
-    PARSER_DOWN.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Bring down the specific component(s)')
+    PARSER_DOWN.add_argument('components', nargs='*', default='*', type=get_components, help='Bring down the specific component(s) or glob matches to bring down. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_DOWN.add_argument('--rm', '-r', action='store_true', help="Don't just bring the component down, but also delete the container")
     PARSER_DOWN.set_defaults(func=action_down)
 
     #Add Subparser for shell action
     PARSER_SHELL = SUBPARSERS.add_parser('sh', help='Execute a shell command inside of a component/container')
-    PARSER_SHELL.add_argument('components', nargs='*', choices=get_components() + ['adhoc'], help='The component(s) where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components')
+    PARSER_SHELL.add_argument('components', nargs='*', default='*', type=get_shell_components, help='The component(s) or globs where the shell/command should be run. If more than one component is specified the command will be run sequentially across the components. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS + ['adhoc'])))
     PARSER_SHELL.add_argument('--adhoc-image', '-i', default='devlab_helper', help='When using the \'adhoc\' component, use this image. [NOTE] This is overridden if --command is specified with \'helper_container|IMAGENAME: /bin/bash\' etc... DEFAULT: \'devlab_helper\'')
     PARSER_SHELL.add_argument('--adhoc-name', '-n', default=None, help='When using the \'adhoc\' component, use this name for the container.')
     PARSER_SHELL.add_argument('--command', '-c', nargs=argparse.REMAINDER, help='Optional command to run instead of an interactive shell')
@@ -2742,7 +2978,7 @@ if __name__ == '__main__':
 
     #Add Subparser for reset action
     PARSER_RESET = SUBPARSERS.add_parser('reset', help='Reset a specific component, getting rid of all data including persistent data. This is useful if you want to have a component start from scratch without re-running the wizard')
-    PARSER_RESET.add_argument('components', nargs='*', choices=get_components() + ['devlab', '*'], default='*', help='Reset the specific component(s). * means all components, but this does NOT inlcude \'devlab\'')
+    PARSER_RESET.add_argument('targets', nargs='*', default='default', type=get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(CUR_COMPONENTS + ['devlab'])))
     PARSER_RESET.add_argument('--reset-wizard', '-r', action='store_true', help='Also remove wizard related files so that the wizard will run again for the specified component')
     PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS DEFINED IN in \'paths.reset_full\'!!')
     PARSER_RESET.set_defaults(func=action_reset)
@@ -2757,7 +2993,7 @@ if __name__ == '__main__':
 
     #Add Subparser for up action
     PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
-    PARSER_UP.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Bring up the specific component')
+    PARSER_UP.add_argument('components', nargs='*', default='*', type=get_components, help='Bring up the specific component(s) based on name or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_UP.add_argument('--bind-to-host', '-b', action='store_true', help='Whether or not we should spin things up so that other systems on your host\'s network will be able to easily reach and work with the spun up components. This generally means if your host\'s IP changes, components will have to be reprovisioned')
     PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any of the provisioning scripts')
     PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
@@ -2772,12 +3008,16 @@ if __name__ == '__main__':
 
     # Add subparser for restart
     PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
-    PARSER_RESTART.add_argument('components', nargs='*', choices=get_components() + ['*'], default='*', help='Restart the specific component')
+    PARSER_RESTART.add_argument('components', nargs='*', default='*', type=get_components, help='Stop and start a specific component(s) or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_RESTART.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones')
     PARSER_RESTART.set_defaults(func=action_restart)
 
     #Parse our args
-    ARGS = PARSER.parse_args(set_default_action(args=sys.argv[1:], subparser=SUBPARSERS))
+    try:
+        ARGS = PARSER.parse_args(set_default_action(args=sys.argv[1:], subparser=SUBPARSERS))
+    except DevlabComponentError as exc:
+        print('ERROR during parsing of aguments: {}'.format(exc))
+        sys.exit(1)
 
     if ARGS.version:
         print('Version: {}'.format(__VERSION__))
