@@ -2929,7 +2929,7 @@ def script_runner_parse(script):
                     pass
         parts_dict['name'] = name
         parts_dict['cimg'] = name
-        parts_dict['script'] = script[2+len(name):].strip()
+        parts_dict['script'] = script[1+len(name):].strip()
     return parts_dict
 
 ##- Main -##
