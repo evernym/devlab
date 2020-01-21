@@ -62,8 +62,7 @@ EOF
 echo "Unsealing freshly initialized vault"
 vault operator unseal $UNSEAL_TOKEN
 
-# Create a new policy for kragle so it can add/update certs for
-# pki-vault-clients and so that it can read sensitive "env" variables.
+# Create a new policy for my_app
 echo "Creating my_app policy"
 vault policy write my_app - <<EOF
 path "secret/my_app/*" {
@@ -77,7 +76,7 @@ path "auth/token/renew-self" {
 }
 EOF
 
-# Create a token for kragle to use with the new policy
+# Create a token for my_app to use with the new policy
 echo "Creating token for my_app to use"
 vault token create -policy=my_app -no-default-policy -period=336h 2>&1 > /devlab/persistent_data/vault/my_app_token.out
 export MY_APP_TOKEN=$(cat /devlab/persistent_data/vault/my_app_token.out | grep '^token ' | awk '{print $2}')
