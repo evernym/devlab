@@ -2999,7 +2999,7 @@ if __name__ == '__main__':
     PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
     PARSER_UP.add_argument('components', nargs='*', default='*', type=get_components, help='Bring up the specific component(s) based on name or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_UP.add_argument('--bind-to-host', '-b', action='store_true', help='Whether or not we should spin things up so that other systems on your host\'s network will be able to easily reach and work with the spun up components. This generally means if your host\'s IP changes, components will have to be reprovisioned')
-    PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any of the provisioning scripts')
+    PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any scripts')
     PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
     PARSER_UP.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones when bringing them "up"')
     PARSER_UP.set_defaults(func=action_up)
