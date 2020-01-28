@@ -1395,9 +1395,12 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
                 containers_dict[container['name']] = container
             container_names = [cntr['name'] for cntr in containers]
             log.debug("Current list of containers: '%s'", ', '.join(container_names))
-            if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
-                log.error("Component: %s is not currently running. Aborting", component)
-                sys.exit(1)
+            try:
+                if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
+                    log.error("Component: %s is not currently running. Aborting", component)
+                    sys.exit(1)
+            except KeyError:
+                log.error("Container %s-devlab doesn't currently exist for component: %s. Try doing an 'up' action first? Aborting", component, component)
         else:
             if not (command.startswith('helper_container|') or command.startswith('running_container|')):
                 log.debug("Building adhoc command...")
