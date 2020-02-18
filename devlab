@@ -1395,9 +1395,12 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
                 containers_dict[container['name']] = container
             container_names = [cntr['name'] for cntr in containers]
             log.debug("Current list of containers: '%s'", ', '.join(container_names))
-            if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
-                log.error("Component: %s is not currently running. Aborting", component)
-                sys.exit(1)
+            try:
+                if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
+                    log.error("Component: %s is not currently running. Aborting", component)
+                    sys.exit(1)
+            except KeyError:
+                log.error("Container %s-devlab doesn't currently exist for component: %s. Try doing an 'up' action first? Aborting", component, component)
         else:
             if not (command.startswith('helper_container|') or command.startswith('running_container|')):
                 log.debug("Building adhoc command...")
@@ -2059,61 +2062,45 @@ def docker_obj_status(name, obj_type, docker_helper, logger=None):
         result.append(res)
     return result
 
-def get_env_from_file(env_file):
+def get_config(fallback_default=False):
     """
-    This reads the file 'env_file' and tries to convert a bash ENV style format
-    to a dict... for example:
-        MY_VAR='hello'
-        OTHER_VAR='world'
-    Would become:
-        {
-            'MY_VAR': 'hello',
-            'OTHER_VAR': 'world'
-        }
-
-    Returns:
-        Generated Dictionary
+    Try to load the main config file
     """
-    conf = {}
-    if os.path.isfile(env_file):
-        with open(env_file, 'r') as efile:
-            for line in efile:
-                line = line.strip()
-                line_split = line.split('=')
-                key = line_split[0]
-                val = '='.join(line_split[1:])
-                #Strip off enclosing quotes
-                for qot in ('"', "'"):
-                    if val[0] == qot:
-                        val = val[1:]
-                        val = val[:-1]
-                if val.lower() in ('true', 'false'):
-                    val = bool(val.lower())
-                conf[key] = val
-    return conf
-
-def get_reset_components(filter_list):
-    """
-    Wrapper for get_components so that argparse can check against custome shell
-    specific virtual components
-    """
-    match_virtual = True
-    if len(filter_list) == 1:
-        if filter_list[0] == 'default':
-            filter_list = ['*']
-            match_virtual = False
-    elif filter_list == 'default':
-        filter_list = ['*']
-        match_virtual = False
-    res = get_components(filter_list=filter_list, virtual_components=('devlab',), match_virtual=match_virtual)
-    return res
-
-def get_shell_components(filter_list):
-    """
-    Wrapper for get_components so that argparse can check against custome shell
-    specific virtual components
-    """
-    return get_components(filter_list=filter_list, virtual_components=('adhoc',))
+    global IMAGES
+    config = deepcopy(CONFIG_DEF)
+    loaded_config = {}
+    for cfile_name in CONFIG_FILE_NAMES:
+        if os.path.isfile('{}/{}'.format(PROJ_ROOT, cfile_name)):
+            with open('{}/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
+                try:
+                    loaded_config = json.load(config_file)
+                except json.decoder.JSONDecodeError:
+                    exc_type, exc_value = sys.exc_info()[:2]
+                    exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
+                        cfile_name=cfile_name,
+                        exc_type=exc_type.__name__,
+                        exc_val=exc_value
+                    )
+                    print(exc_str)
+                    sys.exit(1)
+                break
+        elif fallback_default:
+            if os.path.isfile('{}/defaults/{}'.format(PROJ_ROOT, cfile_name)):
+                with open('{}/defaults/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
+                    try:
+                        loaded_config = json.load(config_file)
+                    except json.decoder.JSONDecodeError:
+                        exc_type, exc_value = sys.exc_info()[:2]
+                        exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
+                            cfile_name=cfile_name,
+                            exc_type=exc_type.__name__,
+                            exc_val=exc_value
+                        )
+                        print(exc_str)
+                        sys.exit(1)
+                    break
+    config.update(loaded_config)
+    return config
 
 def get_components(filter_list=None, virtual_components=None, enabled_only=True, match_virtual=False, logger=None):
     """
@@ -2180,7 +2167,11 @@ def get_components(filter_list=None, virtual_components=None, enabled_only=True,
             for a_comp in all_components:
                 log.debug("Checking component: %s against filter val: %s", a_comp, filt)
                 if filt == a_comp:
+                    log.debug("Found exact match: %s == %s", filt, a_comp)
                     comp_found = True
+                    if len(filter_list) == 1:
+                        components = [a_comp]
+                        break
                 elif fnmatch.fnmatch(a_comp, filt):
                     comp_found = True
                 elif a_comp.startswith(filt):
@@ -2202,58 +2193,38 @@ def get_components(filter_list=None, virtual_components=None, enabled_only=True,
     log.debug("Returning filtered components: %s", components)
     return components
 
-def get_runtime_images():
+def get_env_from_file(env_file):
     """
-    Try to get a list of available runtime images
-    """
-    config = get_config()
-    if 'runtime_images' not in config:
-        config = get_config(fallback_default=True)
-        if 'runtime_images' not in config:
-            return []
-    runtime_images = list(config['runtime_images'].keys())
-    runtime_images.sort()
-    return runtime_images
+    This reads the file 'env_file' and tries to convert a bash ENV style format
+    to a dict... for example:
+        MY_VAR='hello'
+        OTHER_VAR='world'
+    Would become:
+        {
+            'MY_VAR': 'hello',
+            'OTHER_VAR': 'world'
+        }
 
-def get_config(fallback_default=False):
+    Returns:
+        Generated Dictionary
     """
-    Try to load the main config file
-    """
-    global IMAGES
-    config = deepcopy(CONFIG_DEF)
-    loaded_config = {}
-    for cfile_name in CONFIG_FILE_NAMES:
-        if os.path.isfile('{}/{}'.format(PROJ_ROOT, cfile_name)):
-            with open('{}/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
-                try:
-                    loaded_config = json.load(config_file)
-                except json.decoder.JSONDecodeError:
-                    exc_type, exc_value = sys.exc_info()[:2]
-                    exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
-                        cfile_name=cfile_name,
-                        exc_type=exc_type.__name__,
-                        exc_val=exc_value
-                    )
-                    print(exc_str)
-                    sys.exit(1)
-                break
-        elif fallback_default:
-            if os.path.isfile('{}/defaults/{}'.format(PROJ_ROOT, cfile_name)):
-                with open('{}/defaults/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
-                    try:
-                        loaded_config = json.load(config_file)
-                    except json.decoder.JSONDecodeError:
-                        exc_type, exc_value = sys.exc_info()[:2]
-                        exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
-                            cfile_name=cfile_name,
-                            exc_type=exc_type.__name__,
-                            exc_val=exc_value
-                        )
-                        print(exc_str)
-                        sys.exit(1)
-                    break
-    config.update(loaded_config)
-    return config
+    conf = {}
+    if os.path.isfile(env_file):
+        with open(env_file, 'r') as efile:
+            for line in efile:
+                line = line.strip()
+                line_split = line.split('=')
+                key = line_split[0]
+                val = '='.join(line_split[1:])
+                #Strip off enclosing quotes
+                for qot in ('"', "'"):
+                    if val[0] == qot:
+                        val = val[1:]
+                        val = val[:-1]
+                if val.lower() in ('true', 'false'):
+                    val = bool(val.lower())
+                conf[key] = val
+    return conf
 
 def get_needed_images(components=None, logger=None):
     """
@@ -2564,6 +2535,42 @@ def get_proj_root(start_dir=None):
         if cur_dir == '/':
             cur_dir = None
     return cur_dir
+
+def get_reset_components(filter_list):
+    """
+    Wrapper for get_components so that argparse can check against custome shell
+    specific virtual components
+    """
+    match_virtual = True
+    if len(filter_list) == 1:
+        if filter_list[0] == 'default':
+            filter_list = ['*']
+            match_virtual = False
+    elif filter_list == 'default':
+        filter_list = ['*']
+        match_virtual = False
+    res = get_components(filter_list=filter_list, virtual_components=('devlab',), match_virtual=match_virtual)
+    return res
+
+def get_runtime_images():
+    """
+    Try to get a list of available runtime images
+    """
+    config = get_config()
+    if 'runtime_images' not in config:
+        config = get_config(fallback_default=True)
+        if 'runtime_images' not in config:
+            return []
+    runtime_images = list(config['runtime_images'].keys())
+    runtime_images.sort()
+    return runtime_images
+
+def get_shell_components(filter_list):
+    """
+    Wrapper for get_components so that argparse can check against custome shell
+    specific virtual components
+    """
+    return get_components(filter_list=filter_list, virtual_components=('adhoc',))
 
 def is_valid_hostname(hostname):
     """
@@ -2995,7 +3002,7 @@ if __name__ == '__main__':
     PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
     PARSER_UP.add_argument('components', nargs='*', default='*', type=get_components, help='Bring up the specific component(s) based on name or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_UP.add_argument('--bind-to-host', '-b', action='store_true', help='Whether or not we should spin things up so that other systems on your host\'s network will be able to easily reach and work with the spun up components. This generally means if your host\'s IP changes, components will have to be reprovisioned')
-    PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any of the provisioning scripts')
+    PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any scripts')
     PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
     PARSER_UP.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones when bringing them "up"')
     PARSER_UP.set_defaults(func=action_up)
