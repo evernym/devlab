@@ -47,7 +47,7 @@ if [ -z "$RELEASE_BODY" ] ; then
 fi
 
 if [ ! -z "$RELEASE_BODY" ] ; then
-    RELEASE_BODY=$(echo "$RELEASE_BODY" | sed 's/^/ * /')
+    RELEASE_BODY=$(echo "$RELEASE_BODY" | sed 's/^/ * / ; s/"/\\"/g')
     RELEASE_BODY=$(echo -e "# Changes\n$RELEASE_BODY" | sed 's/$/\\n/g' | tr -d '\n')
 fi
 
@@ -74,7 +74,12 @@ if [ $rel_rc -ne 0 ] ; then
     exit $rel_rc
 fi
 RELEASE_ID=$(echo "$release_resp" | jq '.id' 2>&1)
-echo "New release id is: $RELEASE_ID"
+if [ "$?" -ne 0 ] ; then
+    echo "Error parsing RELEASE_ID from json from release_resp"
+    echo "$RELEASE_ID"
+    exit 1
+fi
+echo "New release id is: '$RELEASE_ID'"
 if [ "$RELEASE_ID" == 'null' -o -z "$RELEASE_ID" ] ; then
     echo "Curl Command: 'curl "${REAL_CURL_OPTS[@]}" -X POST https://api.github.com/repos/${OWNER}/${REPO}/releases -d '$RELEASE_JSON'"
     echo "Failed to parse the release id from key 'id' in output:"
