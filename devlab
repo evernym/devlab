@@ -24,10 +24,24 @@ try:
     #Python2
     text_input = raw_input #pylint: disable=invalid-name
     from pipes import quote
+    try:
+        from pathlib2 import Path
+    except ImportError:
+        class Path(object): #pylint: disable=too-few-public-methods
+            """
+            Create a Path object that can simulate python3's Path.home()
+            """
+            @staticmethod
+            def home(self=None): #pylint: disable=bad-staticmethod-argument,unused-argument
+                """
+                Return the expanded path to the user's home
+                """
+                return os.path.expanduser('~')
 except NameError:
     #Python3
     text_input = input #pylint: disable=invalid-name
     quote = shlex.quote #pylint: disable=invalid-name
+    from pathlib import Path
 
 ##- Variables -##
 ARGS = None
@@ -1805,6 +1819,10 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
     log.debug("Getting current list of containers")
     containers = DOCKER.get_containers()[1]
     container_names = [cntr['name'] for cntr in containers]
+    # Check for any images that depend on custom registry and prompt if missing auth
+    if check_custom_registry(components_to_run, config, logger=log):
+        log.error("Please make sure you have logged into needed custom docker registries")
+        sys.exit(1)
     log.debug("Current list of containers: '%s'", ', '.join(container_names))
     for comp in components_to_run:
         if comp == foreground_comp_name:
@@ -1894,6 +1912,52 @@ def action_update(uninstall=False, set_version=None, **kwargs):
         log.error("Installer did not exit successfully... Aborting!")
         sys.exit(1)
     sys.exit(0)
+
+def check_custom_registry(components=None, config=None, logger=None):
+    """
+    Checks through components for any images that use a custom docker registry
+    if any are found then return True. If none are found, then return False
+
+    Args:
+        components: list of component names to check in the config. If None
+            then look through ALL defined components
+        config: Dict of the devlab configuration. If None, then look/load it up
+
+    Returns:
+        Boolean.
+            True if there is an image that uses a custom registry but no auth
+                has been found
+            False if there are not images that use a custom registry
+    """
+    docker_config_loaded = False
+    if not config:
+        config = get_config()
+    if not components:
+        components = list(config['components'].keys())
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('check_custom_registry')
+    docker_config = {
+        'auths': {}
+    }
+    for comp in components:
+        cmpt = config['components'][comp]
+        image_host = parse_docker_image_string(cmpt['image'])['host']
+        if image_host:
+            if not docker_config_loaded:
+                docker_config_path = '{}/.docker/config.json'.format(Path.home())
+                if os.path.isfile(docker_config_path):
+                    with open(docker_config_path) as dcf:
+                        docker_config.update(json.load(dcf))
+                docker_config_loaded = True
+            try:
+                auth_str = docker_config['auths'][image_host] #pylint: disable=unused-variable
+            except KeyError:
+                #Need to auth to the docker registry
+                log.warning("This project is using a docker image hosted on the custom registry: %s, and you appear to have never authenticated to it. \n\nPlease execute:\n    docker login %s\n\nThen try again", image_host, image_host)
+                return True
+    return False
 
 def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False, current_containers=None, background=True, network=None, logger=None):
     """
@@ -2585,6 +2649,8 @@ def is_valid_hostname(hostname):
     # Borrowed from https://stackoverflow.com/questions/2532053/validate-a-hostname-string
     if len(hostname) > 255:
         return False
+    if hostname == 'localhost':
+        return True
     if hostname.endswith("."): # A single trailing dot is legal
         hostname = hostname[:-1] # strip exactly one dot from the right, if present
     disallowed = re.compile(r"[^A-Z\d-]", re.IGNORECASE)
@@ -2651,6 +2717,41 @@ def logging_init(level):
                     **sequences
                 )
             )
+
+def parse_docker_image_string(image):
+    """
+    Take a docker image string and break it into different parts:
+        image: The original image passed in
+        host: Custom registry host. None if it is the default docker hub
+        bare_image: The image with the tag and host stripped off
+        tag: The tag of the image
+    """
+    parsed = {
+        'image': None,
+        'bare_image': '',
+        'tag': None,
+        'host': None
+    }
+    parse_image_split = image.split('/')
+    host_check = parse_image_split[0]
+    host_check_no_port = host_check
+    if ':' in host_check:
+        host_port_split = host_check.split(':')
+        host_port_check = re.match(r'[0-9]{2,5}', host_port_split[1])
+        if host_port_check:
+            host_check_no_port = host_port_split[0]
+    if ':' in host_check and is_valid_hostname(host_check_no_port):
+        parsed['host'] = host_check
+        parsed['bare_image'] = '/'.join(parse_image_split[1:])
+    else:
+        parsed['bare_image'] = image
+    parsed['image'] = image
+    if ':' in parsed['bare_image']:
+        tag_split = parsed['bare_image'].split(':')
+        parsed['bare_image'], parsed['tag'] = tag_split
+    else:
+        parsed['tag'] = 'latest'
+    return parsed
 
 def parse_docker_local_ports(docker_ports):
     """
