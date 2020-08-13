@@ -1744,6 +1744,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
     reprovisionable_components = []
     foreground_comp_name = None
     config = get_config()
+    up_env_file = '{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence'])
     if 'reprovisionable_components' in config:
         reprovisionable_components = config['reprovisionable_components']
     if 'foreground_component' in config:
@@ -1793,8 +1794,11 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         action_build(images=runtime_to_build)
     if not os.path.isdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence'])):
         os.mkdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence']))
-    if os.path.isfile('{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence'])):
-        prev_env = get_env_from_file('{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence']))
+    if os.path.isfile(up_env_file):
+        prev_env = get_env_from_file(up_env_file)
+        if prev_env['BIND_TO_HOST'] != up_env['BIND_TO_HOST']:
+            log.warning("Previous devlab environment was stood up with --bind-to-host set to: %s. Starting with the --bind-to-host set to: %s anyway", prev_env['BIND_TO_HOST'], prev_env['BIND_TO_HOST'])
+            up_env['BIND_TO_HOST'] = prev_env['BIND_TO_HOST']
     else:
         prev_env = dict(up_env)
     if bind_to_host:
@@ -1804,7 +1808,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
             log.warning("Your host's IP Address has changed from: %s to %s. This means we must re-provision components", prev_primary_ip, primary_ip)
             force_reprov = True
     log.debug("Saving this devlab's environment")
-    save_env_file(up_env, '{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence']), force_upper_keys=True)
+    save_env_file(up_env, up_env_file, force_upper_keys=True)
     log.debug("Getting current list of containers")
     containers = DOCKER.get_containers()[1]
     container_names = [cntr['name'] for cntr in containers]
@@ -2275,7 +2279,11 @@ def get_env_from_file(env_file):
                         val = val[1:]
                         val = val[:-1]
                 if val.lower() in ('true', 'false'):
-                    val = bool(val.lower())
+                    val = val.lower()
+                    if val == 'true': #pylint: disable=simplifiable-if-statement
+                        val = True
+                    else:
+                        val = False
                 conf[key] = val
     return conf
 
