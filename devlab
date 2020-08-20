@@ -43,9 +43,15 @@ except NameError:
     quote = shlex.quote #pylint: disable=invalid-name
     from pathlib import Path
 
+try:
+    import yaml
+    YAML_SUPPORT = True
+except ImportError:
+    YAML_SUPPORT = False
+
 ##- Variables -##
 ARGS = None
-CONFIG_FILE_NAMES = ('DevlabConfig.json', 'Devlabconfig.json')
+CONFIG_FILE_NAMES = ('DevlabConfig.json', 'DevlabConfig.yaml', 'DevlabConfig.yml', 'Devlabconfig.json', 'Devlabconfig.yaml', 'Devlabconfig.yml')
 CONFIG_DEF = {
     'domain': 'devlab.lab',
     'wizard_enabled': True,
@@ -56,6 +62,7 @@ CONFIG_DEF = {
     'reprovisionable_components': [],
     'runtime_images': {}
 }
+CONFIG = {}
 DOCKER = None
 PARSER = None
 IMAGES = {
@@ -411,8 +418,32 @@ class DockerHelper(object):
         cmd_ret = Command(
             self.docker_bin_paths,
             [
+                'container',
                 'inspect',
                 container
+            ],
+            split=False,
+            logger=self.log
+        ).run()
+        if cmd_ret[0] == 0:
+            ret = json.loads(cmd_ret[1])
+        return ret
+    def inspect_image(self, image):
+        """
+        Grabs the inspection data (docker inspect) for an image
+
+        Args:
+            image: String of the image you want to inspect
+
+        Return dict
+        """
+        ret = {}
+        cmd_ret = Command(
+            self.docker_bin_paths,
+            [
+                'image',
+                'inspect',
+                image
             ],
             split=False,
             logger=self.log
@@ -1435,11 +1466,7 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
                 else:
                     adhoc_image_parsed['host'] = ''
                 if not adhoc_name:
-                    if adhoc_image_parsed['host']:
-                        #Strip off the host part of the image for generating a more sane name
-                        adhoc_name = adhoc_image_parsed['bare_image']
-                    else:
-                        adhoc_name = adhoc_image
+                    adhoc_name = adhoc_image_parsed['bare_image']
                     adhoc_name = '{}-adhoc'.format(adhoc_name.replace('/', '_').strip('_'))
                 command = 'helper_container|{host}{bare_image}^{tag}^{adhoc_name}: {command}'.format(adhoc_name=adhoc_name, command=command, **adhoc_image_parsed)
                 log.debug("Built adhoc command: '%s'", command)
@@ -1774,9 +1801,11 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         log.info("Looking for and updating images needed by components: %s", ','.join(components_to_run))
         update_component_images(components=components_to_run)
     needed_images = get_needed_images()
-    if needed_images['base_images']['missing']:
-        base_to_build = needed_images['base_images']['missing']
+    if needed_images['base_images']['missing'] or needed_images['base_images']['needs_update']:
+        base_to_build = needed_images['base_images']['missing'] + needed_images['base_images']['needs_update']
         log.debug("Images: '%s' not found in list of current images", base_to_build)
+        if needed_images['base_images']['needs_update']:
+            log.info("Found newer dockerfile(s), will update the following base images: %s", ','.join(needed_images['base_images']['needs_update']))
         log.info("Need to build some base images before trying to start containers")
         action_build(images=base_to_build)
     if config['network']['name']:
@@ -1787,10 +1816,12 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         if not network_status['exists']:
             log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
             DOCKER.create_network(**config['network'])
-    if needed_images['runtime_images']['missing']:
-        runtime_to_build = needed_images['runtime_images']['missing']
+    if needed_images['runtime_images']['missing'] or needed_images['runtime_images']['needs_update']:
+        runtime_to_build = needed_images['runtime_images']['missing'] + needed_images['runtime_images']['needs_update']
         log.debug("Runtime Images: '%s' not found in list of current images", runtime_to_build)
         log.info("Need to build some runtime images before trying to start containers")
+        if needed_images['runtime_images']['needs_update']:
+            log.info("Found newer dockerfile(s), will update the following runtime images: %s", ','.join(needed_images['runtime_images']['needs_update']))
         action_build(images=runtime_to_build)
     if not os.path.isdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence'])):
         os.mkdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence']))
@@ -1950,6 +1981,55 @@ def check_custom_registry(components=None, config=None, logger=None):
                 #Need to auth to the docker registry
                 log.warning("This project is using a docker image hosted on the custom registry: %s, and you appear to have never authenticated to it. \n\nPlease execute:\n    docker login %s\n\nThen try again", image_host, image_host)
                 return True
+    return False
+
+def check_build_image_need_update(image, dockerfile, logger=None):
+    """
+    Determing if an image needs to be updated based on a dockerfile's
+    'last_modified' label. If there is no last_modified label in the dockerfile
+    then return will be False.
+
+    Args:
+        image: str, of the name of the build image
+        dockerfile: str, path to the dockerfile to compare against
+        logger: Logger, for to use for logging
+    Returns:
+        Bool:
+            True, if the image needs to be updated
+            False, if not
+    """
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('check_build_image_need_update')
+    last_modified = 0
+    log.debug("Determining if image: '%s' needs to be rebuilt based on 'last_modified' label", image)
+    with open(dockerfile) as dfile:
+        dfile_contents = dfile.read()
+        for df_line in dfile_contents.splitlines():
+            if df_line.startswith('LABEL'):
+                log.debug("Found LABEL line: '%s'", df_line)
+                if 'last_modified' in df_line:
+                    log.debug("Found desired 'last_modified' LABEL")
+                    last_modified = df_line.split(' ')[1].split('=')[1].strip('"')
+                    log.debug("Last modified value in dockerfile: '%s' is '%s'", dockerfile, last_modified)
+    if last_modified: #Check if the image has the latest 'last_modified' label
+        log.debug("Looking for current last_modified label on existing image: %s", image)
+        image_details = DOCKER.inspect_image('{}:latest'.format(image))[0]['Config']
+        cur_last_modified = None
+        for ilabel, ivalue in image_details['Labels'].items():
+            log.debug("Found existing label: '%s' on image", ilabel)
+            if ilabel == 'last_modified':
+                log.debug("Found desired existing 'last_modified' LABEL with a value of '%s'", ivalue)
+                cur_last_modified = ivalue
+                if last_modified == cur_last_modified:
+                    return False
+                else:
+                    break
+        log.debug("Last modified value in dockerfile: '%s' is not the same as current image: '%s'. Update needed", last_modified, cur_last_modified)
+        return True
+    else:
+        log.debug("No last_modified label defined in dockerfile, no update needed")
     return False
 
 def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False, current_containers=None, background=True, network=None, logger=None):
@@ -2119,22 +2199,33 @@ def docker_obj_status(name, obj_type, docker_helper, logger=None):
         result.append(res)
     return result
 
-def get_config(fallback_default=False):
+def get_config(force_reload=False, fallback_default=False):
     """
     Try to load the main config file
     """
-    global IMAGES
-    config = deepcopy(CONFIG_DEF)
+    global CONFIG
+    if CONFIG and not force_reload:
+        return CONFIG
     loaded_config = {}
+    CONFIG = deepcopy(CONFIG_DEF)
     for cfile_name in CONFIG_FILE_NAMES:
-        if os.path.isfile('{}/{}'.format(PROJ_ROOT, cfile_name)):
-            with open('{}/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
+        cfile_path = '{}/{}'.format(PROJ_ROOT, cfile_name)
+        cfile_name_split = os.path.splitext(cfile_name)
+        if os.path.isfile(cfile_path):
+            if cfile_name_split[1] in ('.yaml', 'yml'):
+                if not YAML_SUPPORT:
+                    print("Found devlab config: {} in yaml format, but the 'yaml' python module is NOT installed. Please install the yaml python module and try again".format(cfile_path))
+                    sys.exit(1)
+            with open(cfile_path, 'r') as config_file:
                 try:
-                    loaded_config = json.load(config_file)
-                except json.decoder.JSONDecodeError:
+                    if YAML_SUPPORT:
+                        loaded_config = yaml.load(config_file, Loader=yaml.SafeLoader)
+                    else:
+                        loaded_config = json.load(config_file)
+                except Exception: #pylint: disable=broad-except
                     exc_type, exc_value = sys.exc_info()[:2]
-                    exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
-                        cfile_name=cfile_name,
+                    exc_str = "Failed loading config file: '{cfile_path}' {exc_type}: {exc_val}".format(
+                        cfile_path=cfile_path,
                         exc_type=exc_type.__name__,
                         exc_val=exc_value
                     )
@@ -2145,19 +2236,22 @@ def get_config(fallback_default=False):
             if os.path.isfile('{}/defaults/{}'.format(PROJ_ROOT, cfile_name)):
                 with open('{}/defaults/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
                     try:
-                        loaded_config = json.load(config_file)
-                    except json.decoder.JSONDecodeError:
+                        if YAML_SUPPORT:
+                            loaded_config = yaml.load(config_file, Loader=yaml.SafeLoader)
+                        else:
+                            loaded_config = json.load(config_file)
+                    except Exception: #pylint: disable=broad-except
                         exc_type, exc_value = sys.exc_info()[:2]
-                        exc_str = "Failed loading JSON config file: '{cfile_name}' {exc_type}: {exc_val}".format(
-                            cfile_name=cfile_name,
+                        exc_str = "Failed loading config file: '{cfile_path}' {exc_type}: {exc_val}".format(
+                            cfile_path=cfile_path,
                             exc_type=exc_type.__name__,
                             exc_val=exc_value
                         )
                         print(exc_str)
                         sys.exit(1)
                     break
-    config.update(loaded_config)
-    return config
+    CONFIG.update(loaded_config)
+    return CONFIG
 
 def get_components(filter_list=None, virtual_components=None, enabled_only=True, match_virtual=False, logger=None):
     """
@@ -2302,16 +2396,19 @@ def get_needed_images(components=None, logger=None):
                 'missing': [],
                 'exists': [],
                 'exists_owned': [],
+                'needs_update': []
             },
             'base_images': {
                 'missing': [],
                 'exists': [],
                 'exists_owned': [],
+                'needs_update': []
             },
             'external_images': {
                 'missing': [],
                 'exists': [],
-                'exists_owned': []
+                'exists_owned': [],
+                'needs_update': []
             }
         }
     """
@@ -2330,16 +2427,19 @@ def get_needed_images(components=None, logger=None):
             'missing': [],
             'exists': [],
             'exists_owned': [],
+            'needs_update': []
         },
         'base_images': {
             'missing': [],
             'exists': [],
             'exists_owned': [],
+            'needs_update': []
         },
         'external_images': {
             'missing': [],
             'exists': [],
-            'exists_owned': []
+            'exists_owned': [],
+            'needs_update': []
         }
     }
     if logger:
@@ -2361,6 +2461,8 @@ def get_needed_images(components=None, logger=None):
             continue
         else:
             result['base_images']['exists'].append(image['name'])
+            if check_build_image_need_update(image=image['name'], dockerfile='{}/{}'.format(DEVLAB_ROOT, IMAGES[image['name']]['docker_file'])):
+                result['base_images']['needs_update'].append(image['name'])
             if image['owned']:
                 result['base_images']['exists_owned'].append(image['name'])
     try:
@@ -2465,6 +2567,16 @@ def get_needed_images(components=None, logger=None):
             result['runtime_images']['missing'].append(rt_image['name'].split(':')[0])
             continue
         else:
+            if check_build_image_need_update(
+                    image=rt_image['name'],
+                    dockerfile='{}/{}'.format(
+                        PROJ_ROOT,
+                        runtime_images_dict[
+                            rt_image['name'].split(':')[0]
+                        ]['docker_file']
+                    )
+                ):
+                result['runtime_images']['needs_update'].append(rt_image['name'])
             result['runtime_images']['exists'].append(rt_image['name'].split(':')[0])
             if rt_image['owned']:
                 result['runtime_images']['exists_owned'].append(rt_image['name'].split(':')[0])
@@ -2567,7 +2679,7 @@ def get_proj_root(start_dir=None):
 
     Args:
         start_dir: String of the path where to start traversing backwards
-            looking for the DevlabConfig.json, config.json and equivalents in defaults/
+            looking for the DevlabConfig.json, DevlabConfig.yaml and equivalents in defaults/
 
     Returns:
         String of the path found, or None if not found
@@ -2671,7 +2783,6 @@ def logging_init(level):
     """
     Initialize and create initial LOGGER
     level is a String of one of:
-        'trace'
         'debug'
         'info'
         'warning'
@@ -3051,7 +3162,7 @@ if __name__ == '__main__':
     PARSER = argparse.ArgumentParser(description='Main interface for devlab')
     PARSER.add_argument('--log-level', '-l', choices=list(LOGGING_LEVELS.keys()), default='info', help='Set the log-level output')
     PARSER.add_argument('--version', '-v', action='store_true', help='Display the version of devlab and exit')
-    PARSER.add_argument('--project-root', '-P', default=None, help='Force project root to a specific path instead of searching for DevlabConfig.json')
+    PARSER.add_argument('--project-root', '-P', default=None, help='Force project root to a specific path instead of searching for DevlabConfig.json/DevlabConfig.yaml etc...')
     SUBPARSERS = PARSER.add_subparsers(help='Actions')
 
     #Add Subparser for dummy default action
@@ -3085,7 +3196,7 @@ if __name__ == '__main__':
     PARSER_RESET = SUBPARSERS.add_parser('reset', help='Reset a specific component, getting rid of all data including persistent data. This is useful if you want to have a component start from scratch without re-running the wizard')
     PARSER_RESET.add_argument('targets', nargs='*', default='default', type=get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(CUR_COMPONENTS + ['devlab'])))
     PARSER_RESET.add_argument('--reset-wizard', '-r', action='store_true', help='Also remove wizard related files so that the wizard will run again for the specified component')
-    PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES PATHS DEFINED IN in \'paths.reset_full\'!!')
+    PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES IN PATHS DEFINED IN YOUR \'paths.reset_full\'!!')
     PARSER_RESET.set_defaults(func=action_reset)
 
     #Add Subparser for global_status action
@@ -3160,7 +3271,7 @@ if __name__ == '__main__':
             ARGS.func(**vars(ARGS))
             sys.exit(0)
         else:
-            LOGGER.error("Aborting... could not determine project root. Please create a DevlabConfig.json")
+            LOGGER.error("Aborting... could not determine project root. Please create a DevlabConfig.json or DevlabConfig.yaml etc...")
             sys.exit(1)
 
     #Load config
@@ -3175,15 +3286,15 @@ if __name__ == '__main__':
                 if WIZ_OUT[0] != 0:
                     LOGGER.error("Wizard did not exit successfully... Aborting!")
                     sys.exit(1)
-                CONFIG = get_config()
+                CONFIG = get_config(force_reload=True)
             else:
                 LOGGER.warning("WARNING!!!!WARNING!!! No wizard found!!!")
 
     #See if we have enough details in our config
     if not CONFIG['components'] and 'foreground_component' not in CONFIG:
-        LOGGER.warning("No DevlabConfig.json was found yet.")
+        LOGGER.warning("No devlab configuration was found yet.")
         LOGGER.info("Trying to load from 'defaults/'")
-        CONFIG = get_config(fallback_default=True)
+        CONFIG = get_config(force_reload=True, fallback_default=True)
         if not CONFIG['components']:
             LOGGER.error("No configured components found!... aborting")
             sys.exit(1)
