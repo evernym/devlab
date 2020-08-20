@@ -21,14 +21,14 @@ There are three options for installing devlab:
 
 # Devlab's terms
 
-1. **Project**: A directory with at least a [DevlabConfig.json](#devlab-configuration) that tells devlab how to stand things up
+1. **Project**: A directory with at least a [DevlabConfig.json or DevlabConfig.yaml](#devlab-configuration) that tells devlab how to stand things up
 1. **Component**: A container that corresponds to a running service. For example: A component called 'loadbalancer' might have a running `haproxy` service running inside of it
 1. **Persistence**: A location that devlab expects a component to store persistent data
 1. **Base Image**: An image that is included with, and managed by devlab
 1. **Runtime Image**: An image that is defined by, and managed by a project that uses devlab
 1. **Script Runner**: An internal reference to a string that can define a script/command to run including where (inside a new container, or an existing component). See [Script Runner Syntax](#script-runner-syntax) for more information.
 1. **Provision**: The act of setting up or completing the setup of a component through the use of scripts. See `pre_scripts` and `scripts` in [Component Config Structure](#component-config-structure)
-1. **Wizard**: A script that is run before the `up` action. After the wizard has been executed a proper [DevlabConfig.json](#devlab-configuration) should exist. It is normal for the wizard to result in more files than just a `DevlabConfig.json`, and those files can be added to the config so that devlab can reset the wizard (forcing it to run again) if so desired.
+1. **Wizard**: A script that is run before the `up` action. After the wizard has been executed a proper [DevlabConfig.json or DevlabConfig.yaml](#devlab-configuration) should exist. It is normal for the wizard to result in more files than just a `DevlabConfig.json` or `DevlabConfig.yaml`, and those files can be added to the config so that devlab can reset the wizard (forcing it to run again) if so desired.
 
 # Usage
 All actions have a `--help` which should display relevent help. The following options below are "global" options and *should* preceed any action:
@@ -58,14 +58,14 @@ If you want to reset the devab's configuration: `devlab reset devlab`
 
 ## How does it do its thing?
 1. The first thing that happens is devlab looks to see if the action set, will need a configuration or not.
-1. If an action needs a configuration then devlab will look for a DevlabConfig.json in the current directory, and works its way backward up the filesystem's tree until it finds one... if none is found then it will look for one in the project's root inside of a `defaults/` directory. This way if a wizard is needed other devlab actions can still operate.
+1. If an action needs a configuration then devlab will look for a DevlabConfig.json or DevlabConfig.yaml in the current directory, and works its way backward up the filesystem's tree until it finds one... if none is found then it will look for one in the project's root inside of a `defaults/` directory. This way if a wizard is needed other devlab actions can still operate.
 1. The `up` action for `devlab` looks for a file in the project's root called `wizard` and executes it if found.
-1. The `wizard` should create any needed files, as well as a 'DevlabConfig.json' which indicates how to stand up each component and where paths are that are managed. See [Devlab Configuration](#devlab-configuration) for more information
+1. The `wizard` should create any needed files, as well as a 'DevlabConfig.json' or 'DevlabConfig.yaml' which indicates how to stand up each component and where paths are that are managed. See [Devlab Configuration](#devlab-configuration) for more information
 1. The `wizard` can prompt for values to update in files etc..
-1. The `devlab` then reads in the DevlabConfig.json and continues
+1. `devlab` then reads in its configuration from either DevlabConfig.json or DevlabConfig.yaml and continues
 
 # Devlab Configuration
-The main configuration file that Devlab uses is a file named `DevlabConfig.json`. It defines things like:
+The main configuration file that Devlab uses is a file named `DevlabConfig.json` or `DevlabConfig.yaml`. It defines things like:
 1. Which docker network to attach containers to
 1. Which components/containers to startup
 1. The order to start up containers
@@ -74,6 +74,14 @@ The main configuration file that Devlab uses is a file named `DevlabConfig.json`
 1. Domain name to assign to each component
 1. List of components that would need to be reprovisioned if the underlying hosts' IP changes
 1. Which files/directories to remove when performing a [reset](#reset-action) action
+
+## YAML support
+Although `devlab` support its configuration to be in yaml format (`DevlabConfig.yaml`) this is highly dependent on the `yaml` python module being present on your system. If you would like your project to be more cross platform compatible stick to JSON, otherwise ensure that users of your project know that they'll need to install `yaml` ie:
+```
+pip install pyyaml
+# or if using python3
+pip3 install pyyaml
+```
 
 ## Base Structure
 The configuration file has the following base structure:
@@ -325,7 +333,7 @@ Using String format syntax
 }
 ```
 
-## A Working DevlabConfig.json Example
+## A Working Devlab Configuration Example
 This is an example taken from the `foreground` example in `examples/foreground` which basically spins up a vault server, unseals, stores some data in it and then the main app just gets that data from the vault service
 ```
 {
@@ -379,6 +387,50 @@ This is an example taken from the `foreground` example in `examples/foreground` 
         ]
     }
 }
+```
+
+Equivalent in yaml format:
+```
+---
+paths:
+  component_persistence: persistent_data
+domain: dev.lab
+project_filter: lab.dev.example.type=devlab
+wizard_enabled: false
+components:
+  vault:
+    image: vault:latest
+    enabled: true
+    cmd: vault server -config /vault/config
+    run_opts:
+    - "-e"
+    - 'VAULT_LOCAL_CONFIG={"backend": {"file": {"path": "/vault/file"}}, "disable_mlock":true,
+      "listener": {"tcp": {"address": "0.0.0.0:8200", "tls_disable":1}}'
+    ports:
+    - 8200:8200
+    mounts:
+    - ":/devlab"
+    - persistent_data/vault/data:/vault/file
+    post_up_scripts:
+    - VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=ThisIsntARealThing /devlab/scripts/setup_vault.sh
+    shell: "/bin/sh"
+    ordinal:
+      group: 0
+      number: 1
+    reset_paths:
+    - data/
+    - env
+    - init.out
+    - my_app_token.out
+foreground_component:
+  name: my_app_vault
+  image: devlab_helper
+  cmd: "/devlab/scripts/start_my_app.sh"
+  mounts:
+  - ":/devlab"
+  reset_paths:
+  - config.yaml
+  - app_data/
 ```
 
 # Devlab Argument documentation
