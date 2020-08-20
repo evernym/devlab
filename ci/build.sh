@@ -24,7 +24,7 @@ if [ ! -z "$CI_COMMIT_TAG" ] ; then
     beg_range="${prev_release_tag}.."
 else
     #check for fallback logic of special commit names etc...
-    legacy_changes=$(git log --pretty=format:'%s%n' | sed "/^Merge branch '.\+' into '.\+'/d ; /^\$/d")
+    legacy_changes=$(git log --pretty=format:'%s%n' | sed "/^Merge branch '.\+' into '.\+'/d ; /^Merge branch '.\+' of .\+/d ; /^\$/d")
     legacy_last_change=$(echo "$legacy_changes" | head -n 1)
     legacy_last_release=$(echo "$legacy_changes" | grep -m 1 '^New release: ')
     if [ "$legacy_last_change" == "$legacy_last_release" ] ; then
@@ -33,7 +33,7 @@ else
     fi
 fi
 echo "Getting changes comit changes between: ${beg_range}${last_change}"
-changes_since_release=$(git log --pretty=format:'%s%n' ${beg_range}${last_change} | sed "/^Merge branch '.\+' into '.\+'/d ; /^$/d")
+changes_since_release=$(git log --pretty=format:'%s%n' ${beg_range}${last_change} | sed "/^Merge branch '.\+' into '.\+'/d ; /^Merge branch '.\+' of .\+/d; /^$/d")
 
 if [ $(echo "$changes_since_release" | wc -l) -gt 0 ] ; then
     echo -e "Building a package with the following NEW changes included:\n----"

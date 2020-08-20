@@ -1,5 +1,6 @@
 FROM ubuntu:18.04
 LABEL "com.lab.devlab"="base"
+LABEL "last_modified"=1597871407
 
 ARG APT="/usr/bin/apt-get --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
 ARG PACKAGES="sudo less screen tmux vim ca-certificates git curl iproute2 less gnupg2"
