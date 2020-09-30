@@ -2461,7 +2461,11 @@ def get_needed_images(components=None, logger=None):
             continue
         else:
             result['base_images']['exists'].append(image['name'])
-            if check_build_image_need_update(image=image['name'], dockerfile='{}/{}'.format(DEVLAB_ROOT, IMAGES[image['name']]['docker_file'])):
+            if IMAGES[image['name']]['docker_file'].startswith(DEVLAB_ROOT):
+                docker_file = IMAGES[image['name']]['docker_file']
+            else:
+                docker_file = '{}/{}'.format(DEVLAB_ROOT, IMAGES[image['name']]['docker_file'])
+            if check_build_image_need_update(image=image['name'], dockerfile=docker_file):
                 result['base_images']['needs_update'].append(image['name'])
             if image['owned']:
                 result['base_images']['exists_owned'].append(image['name'])
