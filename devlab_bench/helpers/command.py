@@ -5,38 +5,11 @@ import fcntl
 import logging
 import os
 import re
-import shlex
 import signal
 import subprocess
 import time
-from devlab_bench import ISATTY
 from devlab_bench.exceptions import DevlabCommandError
-
-__all__ = ['text_input', 'quote', 'Path']
-
-#Python2/3 compatibility
-try:
-    #Python2
-    text_input = raw_input #pylint: disable=invalid-name
-    from pipes import quote
-    try:
-        from pathlib2 import Path
-    except ImportError:
-        class Path(object): #pylint: disable=too-few-public-methods
-            """
-            Create a Path object that can simulate python3's Path.home()
-            """
-            @staticmethod
-            def home(self=None): #pylint: disable=bad-staticmethod-argument,unused-argument
-                """
-                Return the expanded path to the user's home
-                """
-                return os.path.expanduser('~')
-except NameError:
-    #Python3
-    text_input = input #pylint: disable=invalid-name
-    quote = shlex.quote #pylint: disable=invalid-name
-    from pathlib import Path
+from devlab_bench.helpers.common import ISATTY
 
 class Command(object):
     """

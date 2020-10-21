@@ -4,7 +4,6 @@
 Main script for managing the devlab environment stack
 """
 import argparse
-import fnmatch
 import json
 import logging
 import os
@@ -14,50 +13,18 @@ import shutil
 import shlex
 import socket
 import sys
-from copy import deepcopy
-import yaml
 
-from devlab_bench import ISATTY, YAML_SUPPORT
-from devlab_bench.docker import DockerHelper
+import devlab_bench.actions
+import devlab_bench
+from devlab_bench.helpers import text_input, quote
+from devlab_bench.helpers.command import Command
+from devlab_bench.helpers.common import get_components, get_config, get_ordinal_sorting, is_valid_hostname, port_check
+from devlab_bench.helpers.docker import check_custom_registry, docker_obj_status, DockerHelper, get_needed_images, parse_docker_image_string, parse_docker_local_ports
 from devlab_bench.exceptions import DevlabComponentError
-from devlab_bench.helpers import Command, text_input, Path, quote
 
 ##- Variables -##
 ARGS = None
-CONFIG_FILE_NAMES = ('DevlabConfig.json', 'DevlabConfig.yaml', 'DevlabConfig.yml', 'Devlabconfig.json', 'Devlabconfig.yaml', 'Devlabconfig.yml')
-CONFIG_DEF = {
-    'domain': 'devlab.lab',
-    'wizard_enabled': True,
-    'components': {},
-    'network': {
-        'name': None
-    },
-    'reprovisionable_components': [],
-    'runtime_images': {}
-}
-CONFIG = {}
-DOCKER = None
 PARSER = None
-IMAGES = {
-    'devlab_base': {
-        'tag': 'latest',
-        'docker_file': 'docker/base.Dockerfile',
-        'build_opts': [],
-        'ordinal': {
-            'group': 0,
-            'number': 1
-        }
-    },
-    'devlab_helper': {
-        'tag': 'latest',
-        'docker_file': 'docker/helper.Dockerfile',
-        'build_opts': [],
-        'ordinal': {
-            'group': 1,
-            'number': 1
-        }
-    }
-}
 LOGGER = None
 LOGGING_LEVELS = {
     'debug': logging.DEBUG,
@@ -67,149 +34,9 @@ LOGGING_LEVELS = {
     'critical': logging.CRITICAL,
     'notset': logging.NOTSET
 }
-DEVLAB_ROOT = os.path.dirname(os.path.realpath(__file__))
-PROJ_ROOT = None
 __VERSION__ = 'master'
 
 ##- Functions -##
-def action_build(images='*', clean=False, no_cache=False, pull=False, **kwargs):
-    """
-    This is responsible for building all the docker images etc...
-
-    Args:
-        images: list of images to build, this can also be the string '*'
-        clean: boolean indicating whether all images should be removed and
-            rebuilt. Default=False
-        no_cache: boolean indicating whether or images should re-use cache when
-            building. Default=False
-        pull: boolean indicating whether a --pull should happen to update base
-            images. Default=False
-    Returns:
-        None
-    """
-    abort = False
-    ignored_args = kwargs
-    base_images_to_build = []
-    runtime_images_dict = None
-    runtime_images_to_build = []
-    log = logging.getLogger("Build")
-    log_output = False
-    log.debug("Will build with clean set to: %s", clean)
-    log.debug("Will build with no_cache set to: %s", no_cache)
-    log.debug("Will build with pull set to: %s", pull)
-    config = get_config()
-    base_images_dict = dict(IMAGES)
-    images_dict = dict(base_images_dict)
-    docker_helper_base = DockerHelper(
-        labels=[
-            'com.lab.type=devlab'
-        ],
-        common_domain=config['domain']
-    )
-    docker_helper = DOCKER
-    try:
-        runtime_images_dict = dict(config['runtime_images'])
-        images_dict.update(runtime_images_dict)
-    except KeyError:
-        log.info("No runtime_images defined. Skipping...")
-    images_to_build = images
-    if log.getEffectiveLevel() <= logging.DEBUG:
-        log_output = True
-    if images == '*':
-        needed_images = get_needed_images()
-        base_images_to_build = needed_images['base_images']['missing'] + needed_images['base_images']['exists']
-        runtime_images_to_build = needed_images['runtime_images']['missing'] + needed_images['runtime_images']['exists']
-    else:
-        for img in images:
-            if img in base_images_dict:
-                base_images_to_build.append(img)
-            else:
-                runtime_images_to_build.append(img)
-    try:
-        images_to_build = get_ordinal_sorting(base_images_to_build, base_images_dict)
-        images_to_build += get_ordinal_sorting(runtime_images_to_build, runtime_images_dict)
-    except RuntimeError:
-        log.error("Image(s): '%s' not found. Maybe one of them is an image that is built with the --runtime-images argument??", ','.join(images_to_build))
-        sys.exit(1)
-    #See if we need to create a network
-    if config['network']['name']:
-        network_status = docker_obj_status(config['network']['name'], 'network', DOCKER, logger=log)[0]
-        if network_status['exists'] and not network_status['owned']:
-            log.error("Conflicting custom network found! There is already a docker network defined: '%s' , but is not owned by this project", config['network']['name'])
-            sys.exit(1)
-        if not network_status['exists']:
-            log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
-            DOCKER.create_network(**config['network'])
-    log.debug("The following images will be built: %s", ', '.join(images_to_build))
-    for image in images_to_build:
-        if isinstance(images_dict[image]['tag'], list):
-            image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'][0])
-        else:
-            image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'])
-        image_status = docker_obj_status(image_n_tag, 'image', DOCKER, logger=log)[0]
-        image_context = PROJ_ROOT
-        if image in base_images_to_build:
-            image_context = DEVLAB_ROOT
-            docker_helper = docker_helper_base
-        else:
-            docker_helper = DOCKER
-        images_dict[image]['docker_file'] = '{}/{}'.format(image_context, images_dict[image]['docker_file'])
-        if 'build_opts' not in images_dict[image]:
-            images_dict[image]['build_opts'] = []
-        if image in base_images_to_build:
-            if image_status['exists'] and image_status['owned']:
-                log.info("Found old base image: '%s' that has bad labels... Removing so it can be rebuilt", image)
-                rm_res = DOCKER.rm_image(image)
-                if rm_res[0] != 0:
-                    log.error("Failed removing image: %s", image)
-                    break
-                else:
-                    for line in rm_res[1]:
-                        log.debug(line)
-                    log.debug("Successfully removed image: %s", image)
-                    image_status['exists'] = False
-                    image_status['owned'] = False
-        elif image_status['exists'] and not image_status['owned']:
-            log.error("Conflicting image found! There is already an image defined: '%s', but is not owned by this project", image_n_tag)
-            break
-        if clean and image_status['exists']:
-            log.info("Removing image: %s", image)
-            rm_res = DOCKER.rm_image(image)
-            if rm_res[0] != 0:
-                log.error("Failed removing image: %s", image)
-            else:
-                for line in rm_res[1]:
-                    log.debug(line)
-                log.debug("Successfully removed image: %s", image)
-        if pull:
-            with open(images_dict[image]['docker_file']) as  dfile:
-                local_image = False
-                for line in dfile.readlines():
-                    if line.startswith('FROM '):
-                        if line.split()[1].split(':')[0] in images_to_build:
-                            local_image = True
-                            log.debug("Skipping pull, as devlab manages this image's base image")
-                            break
-                if not local_image:
-                    images_dict[image]['build_opts'].append('--pull')
-        if no_cache:
-            images_dict[image]['build_opts'].append('--no-cache')
-        log.info("Building image: %s", image_n_tag)
-        bld_res = docker_helper.build_image(image, context=os.path.dirname(images_dict[image]['docker_file']), log_output=log_output, network=config['network']['name'], logger=logging.getLogger('Build-{}'.format(image)), **images_dict[image])
-        if bld_res[0] != 0:
-            log.error("Failed building image: '%s' Aborting...", image)
-            abort = True
-            break
-        else:
-            log.debug("Successfully built image: %s", image)
-    log.info("Cleaning up unused devlab images")
-    pi_res = DOCKER.prune_images()
-    if pi_res[0] != 0:
-        log.error("Failed cleaning(pruning) images")
-    else:
-        log.debug("Successfully cleaned up(pruned) images")
-    if abort:
-        sys.exit(1)
 
 def action_default(**kwargs):
     """
@@ -243,7 +70,7 @@ def action_down(components='*', rm=False, **kwargs):
     else:
         components_to_stop = components
     log.debug("Getting current list of containers")
-    containers = DOCKER.get_containers()[1]
+    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
     containers_dict = {}
     for container in containers:
         containers_dict[container['name']] = container
@@ -264,12 +91,12 @@ def action_down(components='*', rm=False, **kwargs):
         try:
             if 'up' in containers_dict[comp_cont_name]['status'].lower():
                 log.info("Component: Stopping container: %s...", comp)
-                DOCKER.stop_container(comp_cont_name)
+                devlab_bench.helpers.docker.DOCKER.stop_container(comp_cont_name)
             else:
                 log.info("Component: %s is already stopped. skipping...", comp)
             if rm:
                 log.info("Removing container: %s", comp)
-                DOCKER.rm_container(comp_cont_name, force=True)
+                devlab_bench.helpers.docker.DOCKER.rm_container(comp_cont_name, force=True)
         except KeyError:
             log.info("Component: %s has no container. skipping...", comp)
 
@@ -360,13 +187,13 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
                     cargs.append("'{}'".format(carg))
             else:
                 cargs.append("'{}'".format(targets))
-            script_ret = DOCKER.run_container(
+            script_ret = devlab_bench.helpers.docker.DOCKER.run_container(
                 image='devlab_helper:latest',
                 name='devlab-reset',
                 network=config['network']['name'],
                 mounts=[
-                    '{}:/devlab'.format(PROJ_ROOT),
-                    '{}/devlab:/usr/bin/devlab'.format(DEVLAB_ROOT),
+                    '{}:/devlab'.format(devlab_bench.PROJ_ROOT),
+                    '{}/devlab:/usr/bin/devlab'.format(devlab_bench.DEVLAB_ROOT),
                     '/var/run/docker.sock:/var/run/docker.sock'
                 ],
                 run_opts=['--rm', '--workdir', '/devlab'],
@@ -385,7 +212,7 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
             log.error("You have passed specific components, in addition to --full. When using --full, ALL components are assumed")
             sys.exit(1)
     log.debug("Getting current list of containers")
-    containers = DOCKER.get_containers()[1]
+    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
     containers_dict = {}
     for container in containers:
         containers_dict[container['name']] = container
@@ -442,7 +269,7 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
             try:
                 for wpath in config['paths']['component_persistence_wizard_paths']:
                     full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
-                        PROJ_ROOT=PROJ_ROOT,
+                        PROJ_ROOT=devlab_bench.PROJ_ROOT,
                         comp_pers=config['paths']['component_persistence'],
                         component=comp,
                         path=wpath
@@ -458,7 +285,7 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
         try:
             for rpath in comp_config['reset_paths']:
                 full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
-                    PROJ_ROOT=PROJ_ROOT,
+                    PROJ_ROOT=devlab_bench.PROJ_ROOT,
                     comp_pers=config['paths']['component_persistence'],
                     component=comp,
                     path=rpath
@@ -477,7 +304,7 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
         try:
             for rpath in config['paths']['reset_paths']:
                 full_path = '{PROJ_ROOT}/{path}'.format(
-                    PROJ_ROOT=PROJ_ROOT,
+                    PROJ_ROOT=devlab_bench.PROJ_ROOT,
                     path=rpath
                 ).replace('..', '')
                 log.debug("Looking to see if path exists: '%s'", full_path)
@@ -494,7 +321,7 @@ def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
         try:
             for fpath in config['paths']['reset_full']:
                 full_path = '{PROJ_ROOT}/{path}'.format(
-                    PROJ_ROOT=PROJ_ROOT,
+                    PROJ_ROOT=devlab_bench.PROJ_ROOT,
                     path=fpath
                 ).replace('..', '')
                 if os.path.isdir(full_path):
@@ -543,7 +370,7 @@ def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None
         ignore_nonzero_rc = bool(command.endswith('/bin/bash') or command.endswith('/bin/sh'))
         if component != 'adhoc':
             log.debug("Getting current list of containers")
-            containers = DOCKER.get_containers()[1]
+            containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
             containers_dict = {}
             for container in containers:
                 containers_dict[container['name']] = container
@@ -667,7 +494,7 @@ def action_status(**kwargs):
     if 'foreground_component' in config:
         foreground_comp_name = config['foreground_component']['name']
     log.debug("Getting current list of devlab containers")
-    containers = DOCKER.get_containers()[1]
+    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
     containers_dict = {}
     for container in containers:
         containers_dict[container['name']] = container
@@ -880,7 +707,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
     reprovisionable_components = []
     foreground_comp_name = None
     config = get_config()
-    up_env_file = '{}/{}/devlab_up.env'.format(PROJ_ROOT, config['paths']['component_persistence'])
+    up_env_file = '{}/{}/devlab_up.env'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence'])
     if 'reprovisionable_components' in config:
         reprovisionable_components = config['reprovisionable_components']
     if 'foreground_component' in config:
@@ -916,24 +743,24 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         if needed_images['base_images']['needs_update']:
             log.info("Found newer dockerfile(s), will update the following base images: %s", ','.join(needed_images['base_images']['needs_update']))
         log.info("Need to build some base images before trying to start containers")
-        action_build(images=base_to_build)
+        devlab_bench.actions.build.action(images=base_to_build, docker_helper=devlab_bench.helpers.docker.DOCKER)
     if config['network']['name']:
-        network_status = docker_obj_status(config['network']['name'], 'network', DOCKER, logger=log)[0]
+        network_status = docker_obj_status(config['network']['name'], 'network', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
         if network_status['exists'] and not network_status['owned']:
             log.error("Conflicting custom network found! There is already a docker network defined with this name, but is not owned by this project")
             sys.exit(1)
         if not network_status['exists']:
             log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
-            DOCKER.create_network(**config['network'])
+            devlab_bench.helpers.docker.DOCKER.create_network(**config['network'])
     if needed_images['runtime_images']['missing'] or needed_images['runtime_images']['needs_update']:
         runtime_to_build = needed_images['runtime_images']['missing'] + needed_images['runtime_images']['needs_update']
         log.debug("Runtime Images: '%s' not found in list of current images", runtime_to_build)
         log.info("Need to build some runtime images before trying to start containers")
         if needed_images['runtime_images']['needs_update']:
             log.info("Found newer dockerfile(s), will update the following runtime images: %s", ','.join(needed_images['runtime_images']['needs_update']))
-        action_build(images=runtime_to_build)
-    if not os.path.isdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence'])):
-        os.mkdir('{}/{}'.format(PROJ_ROOT, config['paths']['component_persistence']))
+        devlab_bench.actions.build.action(images=runtime_to_build, docker_helper=devlab_bench.helpers.docker.DOCKER)
+    if not os.path.isdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence'])):
+        os.mkdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence']))
     if os.path.isfile(up_env_file):
         prev_env = get_env_from_file(up_env_file)
         if prev_env['BIND_TO_HOST'] != up_env['BIND_TO_HOST']:
@@ -950,7 +777,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
     log.debug("Saving this devlab's environment")
     save_env_file(up_env, up_env_file, force_upper_keys=True)
     log.debug("Getting current list of containers")
-    containers = DOCKER.get_containers()[1]
+    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
     container_names = [cntr['name'] for cntr in containers]
     # Check for any images that depend on custom registry and prompt if missing auth
     if check_custom_registry(components_to_run, config, logger=log):
@@ -961,7 +788,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         if comp == foreground_comp_name:
             continue
         comp_cont_name = '{}-devlab'.format(comp)
-        cont_status = docker_obj_status(comp_cont_name, 'container', DOCKER, logger=log)[0]
+        cont_status = docker_obj_status(comp_cont_name, 'container', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
         if cont_status['exists'] and not cont_status['owned']:
             log.error("Container: '%s' already exists, but is NOT owned by this project!", comp_cont_name)
             break
@@ -976,7 +803,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
                         log.warning("Removing and resetting data in existing container: '%s' as it needs to be reprovisioned", comp_cont_name)
                         action_reset(comp)
                         log.debug("Refreshing current list of containers")
-                        containers = DOCKER.get_containers()[1]
+                        containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
         cup_ret = component_up(
             name=comp,
             comp_config=config['components'][comp],
@@ -1011,7 +838,7 @@ def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_
         sys.exit(errors)
     if update_images:
         log.info("Cleaning up any dangling images")
-        pi_res = DOCKER.prune_images(prune_all=True)
+        pi_res = devlab_bench.helpers.docker.DOCKER.prune_images(prune_all=True)
         if pi_res[0] != 0:
             log.error("Failed cleaning(pruning) images")
         else:
@@ -1031,7 +858,7 @@ def action_update(uninstall=False, set_version=None, **kwargs):
     ignored_args = kwargs
     log = logging.getLogger("Run/Up")
     log.debug("Running installer.py to check for updates etc...")
-    command = '{}/installer.py'.format(DEVLAB_ROOT)
+    command = '{}/installer.py'.format(devlab_bench.DEVLAB_ROOT)
     args = []
     if uninstall and set_version:
         log.error("Cannot uninstall a specific version. Uninstall takes no argument")
@@ -1045,101 +872,6 @@ def action_update(uninstall=False, set_version=None, **kwargs):
         log.error("Installer did not exit successfully... Aborting!")
         sys.exit(1)
     sys.exit(0)
-
-def check_custom_registry(components=None, config=None, logger=None):
-    """
-    Checks through components for any images that use a custom docker registry
-    if any are found then return True. If none are found, then return False
-
-    Args:
-        components: list of component names to check in the config. If None
-            then look through ALL defined components
-        config: Dict of the devlab configuration. If None, then look/load it up
-
-    Returns:
-        Boolean.
-            True if there is an image that uses a custom registry but no auth
-                has been found
-            False if there are not images that use a custom registry
-    """
-    docker_config_loaded = False
-    if not config:
-        config = get_config()
-    if not components:
-        components = list(config['components'].keys())
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('check_custom_registry')
-    docker_config = {
-        'auths': {}
-    }
-    for comp in components:
-        cmpt = config['components'][comp]
-        image_host = parse_docker_image_string(cmpt['image'])['host']
-        if image_host:
-            if not docker_config_loaded:
-                docker_config_path = '{}/.docker/config.json'.format(Path.home())
-                if os.path.isfile(docker_config_path):
-                    with open(docker_config_path) as dcf:
-                        docker_config.update(json.load(dcf))
-                docker_config_loaded = True
-            try:
-                auth_str = docker_config['auths'][image_host] #pylint: disable=unused-variable
-            except KeyError:
-                #Need to auth to the docker registry
-                log.warning("This project is using a docker image hosted on the custom registry: %s, and you appear to have never authenticated to it. \n\nPlease execute:\n    docker login %s\n\nThen try again", image_host, image_host)
-                return True
-    return False
-
-def check_build_image_need_update(image, dockerfile, logger=None):
-    """
-    Determing if an image needs to be updated based on a dockerfile's
-    'last_modified' label. If there is no last_modified label in the dockerfile
-    then return will be False.
-
-    Args:
-        image: str, of the name of the build image
-        dockerfile: str, path to the dockerfile to compare against
-        logger: Logger, for to use for logging
-    Returns:
-        Bool:
-            True, if the image needs to be updated
-            False, if not
-    """
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('check_build_image_need_update')
-    last_modified = 0
-    log.debug("Determining if image: '%s' needs to be rebuilt based on 'last_modified' label", image)
-    with open(dockerfile) as dfile:
-        dfile_contents = dfile.read()
-        for df_line in dfile_contents.splitlines():
-            if df_line.startswith('LABEL'):
-                log.debug("Found LABEL line: '%s'", df_line)
-                if 'last_modified' in df_line:
-                    log.debug("Found desired 'last_modified' LABEL")
-                    last_modified = df_line.split(' ')[1].split('=')[1].strip('"')
-                    log.debug("Last modified value in dockerfile: '%s' is '%s'", dockerfile, last_modified)
-    if last_modified: #Check if the image has the latest 'last_modified' label
-        log.debug("Looking for current last_modified label on existing image: %s", image)
-        image_details = DOCKER.inspect_image('{}:latest'.format(image))[0]['Config']
-        cur_last_modified = None
-        for ilabel, ivalue in image_details['Labels'].items():
-            log.debug("Found existing label: '%s' on image", ilabel)
-            if ilabel == 'last_modified':
-                log.debug("Found desired existing 'last_modified' LABEL with a value of '%s'", ivalue)
-                cur_last_modified = ivalue
-                if last_modified == cur_last_modified:
-                    return False
-                else:
-                    break
-        log.debug("Last modified value in dockerfile: '%s' is not the same as current image: '%s'. Update needed", last_modified, cur_last_modified)
-        return True
-    else:
-        log.debug("No last_modified label defined in dockerfile, no update needed")
-    return False
 
 def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False, current_containers=None, background=True, network=None, logger=None):
     """
@@ -1155,7 +887,7 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
         log = logging.getLogger('component_up')
     if not current_containers:
         log.debug("Getting current list of containers")
-        current_containers = DOCKER.get_containers()[1]
+        current_containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
     for container in current_containers:
         containers_dict[container['name']] = container
     container_names = [cntr['name'] for cntr in current_containers]
@@ -1167,14 +899,14 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
                 break
             else:
                 log.info("Component: %s has already been created, Starting container...", comp)
-                DOCKER.start_container(comp_cont_name)
+                devlab_bench.helpers.docker.DOCKER.start_container(comp_cont_name)
                 new_container = False
         if new_container:
             if 'mounts' in comp_config:
                 mount_list = []
                 for mount in comp_config['mounts']:
                     if mount[0] != '/':
-                        mount_list.append('{}/{}'.format(PROJ_ROOT, mount))
+                        mount_list.append('{}/{}'.format(devlab_bench.PROJ_ROOT, mount))
                     else:
                         mount_list.append(mount)
                 comp_config['mounts'] = list(mount_list)
@@ -1192,7 +924,7 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
             log.info("Starting component: %s", comp)
             if not background:
                 comp_config['run_opts'].append('--rm')
-            run_ret = DOCKER.run_container(
+            run_ret = devlab_bench.helpers.docker.DOCKER.run_container(
                 name=comp_cont_name,
                 network=network,
                 background=background,
@@ -1233,226 +965,6 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
         break
     return not errors
 
-def docker_obj_status(name, obj_type, docker_helper, logger=None):
-    """
-    Determine if a specific docker object like an image, container, or network
-    exists, and if it is "owned" by the current project
-
-    Args:
-        name: str or list, of the name(s) of the object
-        obj_type: str, one of 'network', 'container', 'image', or 'image_bare'
-            NOTE:
-                'image' includes the tag in the image name. Like: 'stuff:1.0'
-                'image_bare' is the image name without the tag.
-        docker_helper: DockerHelper, to use for querying docker objects
-        logger: Logger, for to use for logging
-    Return:
-        list of dicts.
-        dict structure:
-            {
-                'name': str, of the object name
-                'exists': bool, whether and object with 'name' exists.
-                'owned': bool, whether the object is owned by the specific project
-            }
-    """
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('docker_obj_status')
-    result = list()
-    res_tmpl = {
-        'name': None,
-        'exists': False,
-        'owned': False
-    }
-    owned_obj = list()
-    all_obj = list()
-    if obj_type == 'network':
-        owned_networks = docker_helper.get_networks()[1]
-        owned_obj = [net['name'] for net in owned_networks]
-        all_networks = docker_helper.get_networks(return_all=True)[1]
-        all_obj = [net['name'] for net in all_networks]
-    elif obj_type == 'container':
-        owned_containers = docker_helper.get_containers()[1]
-        owned_obj = [cont['name'] for cont in owned_containers]
-        all_containers = docker_helper.get_containers(return_all=True)[1]
-        all_obj = [cont['name'] for cont in all_containers]
-    elif obj_type == 'image':
-        owned_obj = docker_helper.get_images()[1]
-        all_obj = docker_helper.get_images(return_all=True)[1]
-    elif obj_type == 'image_bare':
-        owned_images = docker_helper.get_images()[1]
-        owned_obj = [image.split(':')[0] for image in owned_images]
-        all_images = docker_helper.get_images(return_all=True)[1]
-        all_obj = [image.split(':')[0] for image in all_images]
-    else:
-        log.warning("Unknown docker object type: '%s'", obj_type)
-    if isinstance(name, list):
-        for nme in name:
-            res = dict(res_tmpl)
-            res['name'] = nme
-            if nme in owned_obj:
-                res['exists'] = True
-                res['owned'] = True
-            elif nme in all_obj:
-                res['exists'] = True
-            result.append(res)
-    else:
-        res = dict(res_tmpl)
-        res['name'] = name
-        if name in owned_obj:
-            res['exists'] = True
-            res['owned'] = True
-        elif name in all_obj:
-            res['exists'] = True
-        result.append(res)
-    return result
-
-def get_config(force_reload=False, fallback_default=False):
-    """
-    Try to load the main config file
-    """
-    global CONFIG
-    if CONFIG and not force_reload:
-        return CONFIG
-    loaded_config = {}
-    CONFIG = deepcopy(CONFIG_DEF)
-    for cfile_name in CONFIG_FILE_NAMES:
-        cfile_path = '{}/{}'.format(PROJ_ROOT, cfile_name)
-        cfile_name_split = os.path.splitext(cfile_name)
-        if os.path.isfile(cfile_path):
-            if cfile_name_split[1] in ('.yaml', 'yml'):
-                if not YAML_SUPPORT:
-                    print("Found devlab config: {} in yaml format, but the 'yaml' python module is NOT installed. Please install the yaml python module and try again".format(cfile_path))
-                    sys.exit(1)
-            with open(cfile_path, 'r') as config_file:
-                try:
-                    if YAML_SUPPORT:
-                        loaded_config = yaml.load(config_file, Loader=yaml.SafeLoader)
-                    else:
-                        loaded_config = json.load(config_file)
-                except Exception: #pylint: disable=broad-except
-                    exc_type, exc_value = sys.exc_info()[:2]
-                    exc_str = "Failed loading config file: '{cfile_path}' {exc_type}: {exc_val}".format(
-                        cfile_path=cfile_path,
-                        exc_type=exc_type.__name__,
-                        exc_val=exc_value
-                    )
-                    print(exc_str)
-                    sys.exit(1)
-                break
-        elif fallback_default:
-            if os.path.isfile('{}/defaults/{}'.format(PROJ_ROOT, cfile_name)):
-                with open('{}/defaults/{}'.format(PROJ_ROOT, cfile_name), 'r') as config_file:
-                    try:
-                        if YAML_SUPPORT:
-                            loaded_config = yaml.load(config_file, Loader=yaml.SafeLoader)
-                        else:
-                            loaded_config = json.load(config_file)
-                    except Exception: #pylint: disable=broad-except
-                        exc_type, exc_value = sys.exc_info()[:2]
-                        exc_str = "Failed loading config file: '{cfile_path}' {exc_type}: {exc_val}".format(
-                            cfile_path=cfile_path,
-                            exc_type=exc_type.__name__,
-                            exc_val=exc_value
-                        )
-                        print(exc_str)
-                        sys.exit(1)
-                    break
-    CONFIG.update(loaded_config)
-    return CONFIG
-
-def get_components(filter_list=None, virtual_components=None, enabled_only=True, match_virtual=False, logger=None):
-    """
-    Try to list available components
-
-    Args:
-        filter_list:
-            List or String of component(s) or glob matches to filter out
-            desired components
-        virtual_components:
-            List of additional "allowed" components that aren't found in the
-            config and should not be filter out
-        enable_only:
-            Boolean whether to only include 'enabled' components ot not
-
-    Returns:
-        List of components, unless filter_list was a string and only one
-        components matches. Then the single string will be returned. This is
-        primarily useful for argparser doing it's checks.
-
-    """
-    config = get_config()
-    all_components = []
-    components = []
-    filter_str = False
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('get_components')
-    log.debug("Looking up components")
-    if 'components' not in config:
-        log.debug("No 'components' has found in config, checking fallback default/ path")
-        config = get_config(fallback_default=True)
-    if 'components' in config:
-        log.debug("Found 'components' path")
-        if enabled_only:
-            log.debug("Only adding 'enabled' components to full list")
-            all_components = list(filter(lambda comp: config['components'][comp]['enabled'], config['components']))
-        else:
-            log.debug("Adding all components (whether enabled or not) to the full list")
-            all_components = list(config['components'])
-    if 'foreground_component' in config:
-        log.debug("Found a 'foreground_component', adding to the full list")
-        all_components.append(config['foreground_component']['name'])
-    if virtual_components:
-        if match_virtual:
-            all_components += virtual_components
-    if filter_list:
-        if isinstance(filter_list, str):
-            filter_str = True
-            filter_list = [filter_list]
-        else:
-            if len(filter_list) == 1:
-                if isinstance(filter_list[0], list):
-                    filter_list = filter_list[0]
-        log.debug("Comparing full list to filter_list: '%s'", ','.join(filter_list))
-        for filt in filter_list:
-            if virtual_components:
-                if filt in virtual_components:
-                    log.debug("Adding '%s' as a virtual component to filtered list", filt)
-                    components.append(filt)
-                    continue
-            comp_found = False
-            for a_comp in all_components:
-                log.debug("Checking component: %s against filter val: %s", a_comp, filt)
-                if filt == a_comp:
-                    log.debug("Found exact match: %s == %s", filt, a_comp)
-                    comp_found = True
-                    if len(filter_list) == 1:
-                        components = [a_comp]
-                        break
-                elif fnmatch.fnmatch(a_comp, filt):
-                    comp_found = True
-                elif a_comp.startswith(filt):
-                    comp_found = True
-                else:
-                    continue
-                log.debug("Adding: '%s' component to filtered list", a_comp)
-                components.append(a_comp)
-            if not comp_found:
-                raise DevlabComponentError("Unknown component: '{}'".format(filt))
-    else:
-        log.debug("Adding known components to filtered list")
-        components = all_components
-    if len(components) == 1:
-        if filter_str:
-            components = components[0]
-    else:
-        components = sorted(set(components))
-    log.debug("Returning filtered components: %s", components)
-    return components
-
 def get_env_from_file(env_file):
     """
     This reads the file 'env_file' and tries to convert a bash ENV style format
@@ -1490,276 +1002,6 @@ def get_env_from_file(env_file):
                 conf[key] = val
     return conf
 
-def get_needed_images(components=None, logger=None):
-    """
-    Look at the configuration and determine which images are needed, depending
-    on which components are configured and what they depend on.
-
-    Args:
-        logger: Logging, object
-
-    Returns:
-        dict:
-        {
-            'runtime_images': {
-                'missing': [],
-                'exists': [],
-                'exists_owned': [],
-                'needs_update': []
-            },
-            'base_images': {
-                'missing': [],
-                'exists': [],
-                'exists_owned': [],
-                'needs_update': []
-            },
-            'external_images': {
-                'missing': [],
-                'exists': [],
-                'exists_owned': [],
-                'needs_update': []
-            }
-        }
-    """
-    config = get_config()
-    if not components:
-        components = get_components()
-    base_images = list(IMAGES.keys())
-    foreground_comp_name = None
-    if 'foreground_component' in config:
-        foreground_comp_name = config['foreground_component']['name']
-    runtime_images_rdeps = []
-    runtime_images_dict = None
-    external_images_rdeps = []
-    result = {
-        'runtime_images': {
-            'missing': [],
-            'exists': [],
-            'exists_owned': [],
-            'needs_update': []
-        },
-        'base_images': {
-            'missing': [],
-            'exists': [],
-            'exists_owned': [],
-            'needs_update': []
-        },
-        'external_images': {
-            'missing': [],
-            'exists': [],
-            'exists_owned': [],
-            'needs_update': []
-        }
-    }
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('get_needed_images')
-    #Get a status for all of the base images, to see if they exist or not
-    base_images_status = docker_obj_status(
-        name=base_images,
-        obj_type='image_bare',
-        docker_helper=DOCKER,
-        logger=log
-    )
-    #Find missing/exists, and owned base images:
-    for image in base_images_status:
-        if not image['exists']:
-            log.debug("Base Image/tag: '%s' not found in list of current images: %s", image['name'], base_images)
-            result['base_images']['missing'].append(image['name'])
-            continue
-        else:
-            result['base_images']['exists'].append(image['name'])
-            if IMAGES[image['name']]['docker_file'].startswith(DEVLAB_ROOT):
-                docker_file = IMAGES[image['name']]['docker_file']
-            else:
-                docker_file = '{}/{}'.format(DEVLAB_ROOT, IMAGES[image['name']]['docker_file'])
-            if check_build_image_need_update(image=image['name'], dockerfile=docker_file):
-                result['base_images']['needs_update'].append(image['name'])
-            if image['owned']:
-                result['base_images']['exists_owned'].append(image['name'])
-    try:
-        runtime_images_dict = dict(config['runtime_images'])
-    except KeyError:
-        log.debug("No runtime_images defined. Skipping...")
-    #Find runtime images that are reverse dependencies
-    if runtime_images_dict:
-        rt_images = list(runtime_images_dict.keys())
-    else:
-        log.debug("No runtime based images defined. Skipping checks for their reverse dependencies")
-        rt_images = []
-    #Look for references in components
-    for comp in components:
-        if comp == foreground_comp_name:
-            comp_config = config['foreground_component']
-            comp_config['enabled'] = True
-        else:
-            comp_config = config['components'][comp]
-        if comp_config['enabled']:
-            comp_img = comp_config['image'].split(':')[0]
-            #Found direct dependencies for a component's image
-            if comp_img in rt_images:
-                image_n_tag = '{}:{}'.format(comp_img, runtime_images_dict[comp_img]['tag'])
-                if image_n_tag not in runtime_images_rdeps:
-                    log.debug("Discovered needed runtime Image/tag (Direct dependency by component '%s'): '%s'", comp, image_n_tag)
-                    runtime_images_rdeps.append(image_n_tag)
-            elif comp_img in base_images:
-                log.debug("Discovered needed base image (Direct dependency by component '%s'): %s", comp, comp_img)
-            else:
-                try:
-                    tag = comp_config['image'].split(':')[1]
-                except IndexError:
-                    tag = 'latest'
-                image_n_tag = '{}:{}'.format(comp_img, tag)
-                if image_n_tag not in external_images_rdeps:
-                    log.debug("Discovered needed external Image/tag (Direct dependency by component '%s'): '%s'", comp, image_n_tag)
-                    external_images_rdeps.append(image_n_tag)
-            #Look for reverse dependencies inside of scripts, status_scripts, pre_scripts, and post_up_scripts
-            for script_key in ('scripts', 'status_script', 'pre_scripts', 'post_up_scripts'):
-                try:
-                    script_cmd = comp_config[script_key]
-                except KeyError:
-                    continue
-                if isinstance(script_cmd, list):
-                    for scr in script_cmd:
-                        if scr.startswith('helper_container|'):
-                            script_image = scr.split(':')[0].split('|')[1]
-                            #Found a reverse dependency on a runtime image from a script
-                            if script_image in rt_images:
-                                itag = runtime_images_dict[script_image]['tag']
-                                if isinstance(itag, list):
-                                    itag = itag[0]
-                                image_n_tag = '{}:{}'.format(script_image, itag)
-                                if image_n_tag not in runtime_images_rdeps:
-                                    log.debug("Discovered needed runtime Image/tag (runtime from scripts used by component '%s'): '%s'", comp, image_n_tag)
-                                    if image_n_tag not in runtime_images_rdeps:
-                                        runtime_images_rdeps.append(image_n_tag)
-                            elif script_image in base_images:
-                                log.debug("Discovered needed base image (from scripts used by component '%s'): %s", comp, script_image)
-                            else:
-                                try:
-                                    tag = script_image.split('^')[1]
-                                except IndexError:
-                                    tag = 'latest'
-                                script_image_tag = '{}:{}'.format(script_image.split('^')[0], tag)
-                                if script_image_tag not in external_images_rdeps:
-                                    log.debug("Discovered needed external image (from scripts used by component '%s'): %s", comp, script_image_tag)
-                                    external_images_rdeps.append(script_image_tag)
-                else:
-                    if script_cmd.startswith('helper_container|'):
-                        script_image = script_cmd.split(':')[0].split('|')[1]
-                        #Found a reverese dependency on a runtime images from a script
-                        if script_image in rt_images:
-                            itag = runtime_images_dict[script_image]['tag']
-                            if isinstance(itag, list):
-                                itag = itag[0]
-                            image_n_tag = '{}:{}'.format(script_image, itag)
-                            if image_n_tag not in runtime_images_rdeps:
-                                log.debug("Discovered needed runtime Image/tag (runtime from scripts used by component '%s'): '%s'", comp, image_n_tag)
-                                runtime_images_rdeps.append(image_n_tag)
-                        elif script_image in base_images:
-                            log.debug("Discovered needed base image (from scripts used by component '%s'): %s", comp, script_image)
-                        else:
-                            try:
-                                tag = script_image.split('^')[1]
-                            except IndexError:
-                                tag = 'latest'
-                            script_image_tag = '{}:{}'.format(script_image.split('^')[0], tag)
-                            if script_image_tag not in external_images_rdeps:
-                                log.debug("Discovered needed external image (from scripts used by component '%s'): %s", comp, script_image_tag)
-                                external_images_rdeps.append(script_image_tag)
-    runtime_images_status = docker_obj_status(
-        name=runtime_images_rdeps,
-        obj_type='image',
-        docker_helper=DOCKER,
-        logger=log
-    )
-    for rt_image in runtime_images_status:
-        if not rt_image['exists']:
-            log.debug("Runtime Image/tag: '%s' not found in list of current images: %s", rt_image['name'], runtime_images_rdeps)
-            result['runtime_images']['missing'].append(rt_image['name'].split(':')[0])
-            continue
-        else:
-            if check_build_image_need_update(
-                    image=rt_image['name'],
-                    dockerfile='{}/{}'.format(
-                        PROJ_ROOT,
-                        runtime_images_dict[
-                            rt_image['name'].split(':')[0]
-                        ]['docker_file']
-                    )
-                ):
-                result['runtime_images']['needs_update'].append(rt_image['name'])
-            result['runtime_images']['exists'].append(rt_image['name'].split(':')[0])
-            if rt_image['owned']:
-                result['runtime_images']['exists_owned'].append(rt_image['name'].split(':')[0])
-    external_images_status = docker_obj_status(
-        name=external_images_rdeps,
-        obj_type='image',
-        docker_helper=DOCKER,
-        logger=log
-    )
-    for ext_image in external_images_status:
-        if not ext_image['exists']:
-            log.debug("External Image/tag: '%s' not found in list of current images: %s", ext_image['name'], runtime_images_rdeps)
-            result['external_images']['missing'].append(ext_image['name'])
-            continue
-        else:
-            result['external_images']['exists'].append(ext_image['name'])
-            if ext_image['owned']:
-                result['external_images']['exists_owned'].append(ext_image['name'])
-    return result
-
-def get_ordinal_sorting(components, config_components):
-    """
-    Go through the components in the list 'components', and generate a
-    sorted list per their ordinal in the config_components
-    """
-    #First generate a dict of the combined ordinals and components
-    ordinals = {}
-    ordinal_sorted = []
-    log = logging.getLogger('get_ordinal_sorting')
-    log.debug("Will be getting ordinal sorting for components: '%s'", ', '.join(components))
-    for comp in components:
-        try:
-            exists = config_components[comp]
-            del exists
-        except KeyError:
-            raise RuntimeError("Unknown component: {}".format(comp))
-        try:
-            grp = config_components[comp]['ordinal']['group']
-        except KeyError:
-            grp = 100
-        try:
-            num = config_components[comp]['ordinal']['number']
-        except KeyError:
-            num = 100
-        ordinals['{}:{}|{}'.format(grp, num, comp)] = comp
-    log.debug("Ordinals found for components: %s", ordinals)
-    def human_keys(astr):
-        """
-        Sorts keys based on human order.. IE 1 is less than 10 etc..
-
-        alist.sort(key=human_keys) sorts in human order
-        """
-        keys = []
-        for elt in re.split(r'(\d+)', astr):
-            elt = elt.swapcase()
-            try:
-                elt = int(elt)
-            except ValueError:
-                pass
-            keys.append(elt)
-        return keys
-    #Get the list of ordinals, and human sort them
-    ordinal_list = sorted(tuple(ordinals.keys()), key=human_keys)
-    log.debug("Sorted list of ordinals: '%s'", ', '.join(ordinal_list))
-    #Generate the sorted list of components by the sorted ordinal
-    for ordinal in ordinal_list:
-        ordinal_sorted.append(ordinals[ordinal])
-    log.debug("Sorted components by ordinal: '%s'", ', '.join(ordinal_sorted))
-    return ordinal_sorted
-
 def get_primary_ip():
     """
     Gets the IP address of whichever interface has a default route
@@ -1785,42 +1027,6 @@ def get_primary_ip():
         finally:
             skt.close()
     return ip
-
-def get_proj_root(start_dir=None):
-    """
-    Try and determine the project's root path
-
-    Args:
-        start_dir: String of the path where to start traversing backwards
-            looking for the DevlabConfig.json, DevlabConfig.yaml and equivalents in defaults/
-
-    Returns:
-        String of the path found, or None if not found
-    """
-    if not start_dir:
-        start_dir = '.'
-    start_dir = os.path.abspath(start_dir)
-    cur_dir = start_dir
-    found = False
-    while cur_dir != None:
-        if os.path.basename(cur_dir) != 'defaults':
-            for cfile_name in CONFIG_FILE_NAMES:
-                if os.path.isfile('{}/{}'.format(cur_dir, cfile_name)):
-                    found = True
-                    break
-                if os.path.isfile('{}/defaults/{}'.format(cur_dir, cfile_name)):
-                    if os.path.isfile('{}/wizard'.format(cur_dir)):
-                        found = True
-                        break
-                    else:
-                        sys.stderr.write("Found '{cur_dir}/defaults/{cfile_name}' but no wizard found. Please pre-generate a config file: ({cfile_name}), or create a wizard that will do it for you so we can call it".format(cur_dir=cur_dir, cfile_name=cfile_name))
-                        sys.exit(1)
-            if found:
-                break
-        cur_dir = os.path.dirname(cur_dir)
-        if cur_dir == '/':
-            cur_dir = None
-    return cur_dir
 
 def get_reset_components(filter_list):
     """
@@ -1857,30 +1063,6 @@ def get_shell_components(filter_list):
     specific virtual components
     """
     return get_components(filter_list=filter_list, virtual_components=('adhoc',))
-
-def is_valid_hostname(hostname):
-    """
-    Takes a hostname and tries to determine if it is valid or not
-
-    Args:
-        hostname: String of the hostname to check
-
-    Returns:
-        Boolean if it is valid or not
-    """
-    # Borrowed from https://stackoverflow.com/questions/2532053/validate-a-hostname-string
-    if len(hostname) > 255:
-        return False
-    if hostname == 'localhost':
-        return True
-    if hostname.endswith("."): # A single trailing dot is legal
-        hostname = hostname[:-1] # strip exactly one dot from the right, if present
-    disallowed = re.compile(r"[^A-Z\d-]", re.IGNORECASE)
-    return all( # Split by labels and verify individually
-        (label and len(label) <= 63 # length is within proper range
-         and not label.startswith("-") and not label.endswith("-") # no bordering hyphens
-         and not disallowed.search(label)) # contains only legal characters
-        for label in hostname.split("."))
 
 def load_json_config(config_path):
     """
@@ -1928,7 +1110,7 @@ def logging_init(level):
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     #Setup ANSI coloring for the log level name
-    if platform.system() != 'Windows' and ISATTY:
+    if platform.system() != 'Windows' and devlab_bench.ISATTY:
         for l_level in level_colors:
             logging.addLevelName(
                 l_level,
@@ -1938,92 +1120,6 @@ def logging_init(level):
                     **sequences
                 )
             )
-
-def parse_docker_image_string(image):
-    """
-    Take a docker image string and break it into different parts:
-        image: The original image passed in
-        host: Custom registry host. None if it is the default docker hub
-        bare_image: The image with the tag and host stripped off
-        tag: The tag of the image
-    """
-    parsed = {
-        'image': None,
-        'bare_image': '',
-        'tag': None,
-        'host': None
-    }
-    parse_image_split = image.split('/')
-    host_check = parse_image_split[0]
-    host_check_no_port = host_check
-    if ':' in host_check:
-        host_port_split = host_check.split(':')
-        host_port_check = re.match(r'[0-9]{2,5}$', host_port_split[1])
-        if host_port_check:
-            host_check_no_port = host_port_split[0]
-    if ':' in host_check and is_valid_hostname(host_check_no_port) and len(parse_image_split) > 1:
-        parsed['host'] = host_check
-        parsed['bare_image'] = '/'.join(parse_image_split[1:])
-    else:
-        parsed['bare_image'] = image
-    parsed['image'] = image
-    if ':' in parsed['bare_image']:
-        tag_split = parsed['bare_image'].split(':')
-        parsed['bare_image'], parsed['tag'] = tag_split
-    else:
-        parsed['tag'] = 'latest'
-    return parsed
-
-def parse_docker_local_ports(docker_ports):
-    """
-    Take a docker publish port formatted string and return the local port
-
-    Args:
-        docker_ports: string representation of a docker port publish format
-
-    Returns:
-        The parsed local port string
-    """
-    if not isinstance(docker_ports, list):
-        port_split = docker_ports.split(':')
-    else:
-        port_split = docker_ports
-    if '/' in docker_ports:
-        proto = docker_ports.split('/')[1]
-    else:
-        proto = 'tcp'
-    try:
-        localport = int(port_split[0], base=10)
-        return "{}({})".format(localport, proto)
-    except ValueError:
-        port_range = port_split[0].split('-')
-        if len(port_range) != 2:
-            port_string_tail = parse_docker_local_ports(port_split[1:])
-            return "{}({})".format(port_string_tail, proto)
-        return "{}-{}({})".format(port_range[0], port_range[1], proto)
-
-def port_check(host, port, timeout=2):
-    """
-    Perform a basic socket connect to 'host' on 'port'.
-
-    Args:
-        host: String of the host/ip to connect to
-        port: integer of the port to connect to on 'host'
-        timeout: integer indicating timeout for connecting. Default=2
-
-    Returns:
-        Boolean whether the connection was successful or now
-    """
-    skt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    skt.settimeout(timeout)
-    try:
-        skt.connect((host, int(port)))
-        skt.shutdown(socket.SHUT_RDWR)
-        return True
-    except Exception: ##pylint: disable=broad-except
-        return False
-    finally:
-        skt.close()
 
 def unnest_list(to_unnest, sort=True):
     """
@@ -2066,10 +1162,10 @@ def update_component_images(components=None, logger=None):
     int_images += needed_images['runtime_images']['exists'] + needed_images['runtime_images']['missing']
     log_output = True
     log.info("Building/Updating devlab and project's managed images: '%s'", ','.join(int_images))
-    action_build(int_images, clean=True, pull=True)
+    devlab_bench.actions.build.action(int_images, docker_helper=devlab_bench.helpers.docker.DOCKER, clean=True, pull=True)
     for ext_image in ext_images:
         log.info("Pulling down any updates to image: '%s'", ext_image)
-        pi_res = DOCKER.pull_image(ext_image, log_output=log_output, logger=log)
+        pi_res = devlab_bench.helpers.docker.DOCKER.pull_image(ext_image, log_output=log_output, logger=log)
         if pi_res[0] != 0:
             log.error("Failed pulling updates for image: %s", ext_image)
             sys.exit(1)
@@ -2190,12 +1286,12 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
                 name = cimg_split[2]
             log.debug("Found tag: %s for image: %s. Container name will be: %s", ctag, cimg, name)
         log.info("Executing command: '%s' inside of new container: '%s', using image: '%s:%s'", script_stripped, name, cimg, ctag)
-        script_ret = DOCKER.run_container(
+        script_ret = devlab_bench.helpers.docker.DOCKER.run_container(
             image='{}:{}'.format(cimg, ctag),
             name=name,
-            network=CONFIG['network']['name'],
+            network=devlab_bench.CONFIG['network']['name'],
             mounts=[
-                '{}:/devlab'.format(PROJ_ROOT)
+                '{}:/devlab'.format(devlab_bench.PROJ_ROOT)
             ],
             background=False,
             interactive=interactive,
@@ -2207,7 +1303,7 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
         )
     else:
         log.info("Executing command: '%s' inside of container: %s", script_stripped, name)
-        script_ret = DOCKER.exec_cmd(
+        script_ret = devlab_bench.helpers.docker.DOCKER.exec_cmd(
             name=name,
             background=False,
             interactive=interactive,
@@ -2262,7 +1358,6 @@ def script_runner_parse(script):
     return parts_dict
 
 ##- Main -##
-PROJ_ROOT = get_proj_root()
 if __name__ == '__main__':
     CUR_COMPONENTS = get_components()
     #Top level parser
@@ -2278,11 +1373,11 @@ if __name__ == '__main__':
 
     #Add Subparser for build action
     PARSER_BUILD = SUBPARSERS.add_parser('build', help='Build docker images')
-    PARSER_BUILD.add_argument('images', nargs='*', choices=list(IMAGES.keys()) + get_runtime_images() + ['*'], default='*', help='Build the specific image or images. Leave empty for all(*)')
+    PARSER_BUILD.add_argument('images', nargs='*', choices=list(devlab_bench.IMAGES.keys()) + get_runtime_images() + ['*'], default='*', help='Build the specific image or images. Leave empty for all(*)')
     PARSER_BUILD.add_argument('--clean', '-c', action='store_true', help='Do a clean build, which will remove all images and then rebuild them')
     PARSER_BUILD.add_argument('--no-cache', '-C', action='store_true', help='Don\'t use docker\'s cache when building')
     PARSER_BUILD.add_argument('--pull', '-p', action='store_true', help='Try to pull the latest version of images during build')
-    PARSER_BUILD.set_defaults(func=action_build)
+    PARSER_BUILD.set_defaults(func=devlab_bench.actions.build.action)
 
     #Add Subparser for down action
     PARSER_DOWN = SUBPARSERS.add_parser('down', help='Bring down components')
@@ -2350,74 +1445,74 @@ if __name__ == '__main__':
     logging_init(level=ARGS.log_level)
     LOGGER = logging.getLogger("Main")
 
-    #The 'update' action is special and doesn't need all of the checks or a PROJ_ROOT etc..
+    #The 'update' action is special and doesn't need all of the checks or a devlab_bench.PROJ_ROOT etc..
     #it also will exit after executing
     if ARGS.func in [action_update, action_global_status, action_default]:
         ARGS.func(**vars(ARGS))
 
     if ARGS.project_root:
-        PROJ_ROOT = ARGS.project_root
+        devlab_bench.PROJ_ROOT = ARGS.project_root
 
-    if not PROJ_ROOT:
+    if not devlab_bench.PROJ_ROOT:
         #Running Adhoc without a project won't get us a DockerHelper object.
         #this will create one if none has been set.
         if ARGS.func == action_shell and ARGS.components == ['adhoc']:
-            PROJ_ROOT = os.path.abspath('.')
-            DOCKER = DockerHelper(
+            devlab_bench.PROJ_ROOT = os.path.abspath('.')
+            devlab_bench.helpers.docker.DOCKER = DockerHelper(
                 labels=[
                     'com.lab.type=devlab',
-                    'com.lab.project={}'.format(PROJ_ROOT)
+                    'com.lab.project={}'.format(devlab_bench.PROJ_ROOT)
                 ]
             )
-            CONFIG = {
+            devlab_bench.CONFIG = {
                 'network': {
                     'name': None
                 }
             }
             # Run the adhoc function
-            ARGS.func(**vars(ARGS))
+            ARGS.func(**vars(ARGS), docker_helper=devlab_bench.helpers.docker.DOCKER)
             sys.exit(0)
         else:
             LOGGER.error("Aborting... could not determine project root. Please create a DevlabConfig.json or DevlabConfig.yaml etc...")
             sys.exit(1)
 
     #Load config
-    CONFIG = get_config()
+    devlab_bench.CONFIG = get_config()
 
     #If we're doing an 'up' action, check for and run wizard
     if ARGS.func == action_up:
-        if CONFIG['wizard_enabled']:
-            if os.path.isfile('{}/wizard'.format(PROJ_ROOT)):
+        if devlab_bench.CONFIG['wizard_enabled']:
+            if os.path.isfile('{}/wizard'.format(devlab_bench.PROJ_ROOT)):
                 LOGGER.debug("Running wizard, in case it needs to be run")
-                WIZ_OUT = Command('{}/wizard'.format(PROJ_ROOT), interactive=True).run()
+                WIZ_OUT = Command('{}/wizard'.format(devlab_bench.PROJ_ROOT), interactive=True).run()
                 if WIZ_OUT[0] != 0:
                     LOGGER.error("Wizard did not exit successfully... Aborting!")
                     sys.exit(1)
-                CONFIG = get_config(force_reload=True)
+                devlab_bench.CONFIG = get_config(force_reload=True)
             else:
                 LOGGER.warning("WARNING!!!!WARNING!!! No wizard found!!!")
 
     #See if we have enough details in our config
-    if not CONFIG['components'] and 'foreground_component' not in CONFIG:
+    if not devlab_bench.CONFIG['components'] and 'foreground_component' not in devlab_bench.CONFIG:
         LOGGER.warning("No devlab configuration was found yet.")
         LOGGER.info("Trying to load from 'defaults/'")
-        CONFIG = get_config(force_reload=True, fallback_default=True)
-        if not CONFIG['components']:
+        devlab_bench.CONFIG = get_config(force_reload=True, fallback_default=True)
+        if not devlab_bench.CONFIG['components']:
             LOGGER.error("No configured components found!... aborting")
             sys.exit(1)
 
-    #Create out DockerHelper Object
-    DOCKER = DockerHelper(
-        filter_label=CONFIG['project_filter'],
+    #Create our DockerHelper Object
+    devlab_bench.helpers.docker.DOCKER = DockerHelper(
+        filter_label=devlab_bench.CONFIG['project_filter'],
         labels=[
             'com.lab.type=devlab',
-            'com.lab.project={}'.format(PROJ_ROOT)
+            'com.lab.project={}'.format(devlab_bench.PROJ_ROOT)
         ],
-        common_domain=CONFIG['domain']
+        common_domain=devlab_bench.CONFIG['domain']
     )
 
     #Change directory to the root of the project
-    os.chdir(PROJ_ROOT)
+    os.chdir(devlab_bench.PROJ_ROOT)
 
     #Run the action function
-    ARGS.func(**vars(ARGS))
+    ARGS.func(**vars(ARGS), docker_helper=devlab_bench.helpers.docker.DOCKER)
