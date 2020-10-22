@@ -951,19 +951,25 @@ def check_custom_registry(components=None, config=None, logger=None):
             False if there are not images that use a custom registry
     """
     docker_config_loaded = False
-    if not config:
-        config = get_config()
-    if not components:
-        components = list(config['components'].keys())
+    foreground_comp_name = None
     if logger:
         log = logger
     else:
         log = logging.getLogger('check_custom_registry')
+    if not config:
+        config = get_config()
+    if not components:
+        components = list(config['components'].keys())
     docker_config = {
         'auths': {}
     }
+    if 'foreground_component' in config:
+        foreground_comp_name = config['foreground_component']['name']
     for comp in components:
-        cmpt = config['components'][comp]
+        if comp == foreground_comp_name:
+            cmpt = config['foreground_component']
+        else:
+            cmpt = config['components'][comp]
         image_host = parse_docker_image_string(cmpt['image'])['host']
         if image_host:
             if not docker_config_loaded:

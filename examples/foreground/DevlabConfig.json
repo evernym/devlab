@@ -6,7 +6,7 @@
     "project_filter": "lab.dev.example.type=devlab",
     "wizard_enabled": false,
     "components": {
-        "vault": {
+        "vault-example": {
             "image": "vault:latest",
             "enabled": true,
             "cmd": "vault server -config /vault/config",

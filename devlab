@@ -8,18 +8,13 @@ import json
 import logging
 import os
 import platform
-import re
-import shutil
-import shlex
-import socket
 import sys
 
 import devlab_bench.actions
 import devlab_bench
-from devlab_bench.helpers import text_input, quote
 from devlab_bench.helpers.command import Command
-from devlab_bench.helpers.common import get_components, get_config, get_ordinal_sorting, is_valid_hostname, port_check
-from devlab_bench.helpers.docker import check_custom_registry, docker_obj_status, DockerHelper, get_needed_images, parse_docker_image_string, parse_docker_local_ports
+from devlab_bench.helpers.common import get_components, get_config, get_shell_components
+from devlab_bench.helpers.docker import DockerHelper
 from devlab_bench.exceptions import DevlabComponentError
 
 ##- Variables -##
@@ -44,369 +39,6 @@ def action_default(**kwargs):
     """
     ignored_args = kwargs
     PARSER.parse_args(['-h'])
-
-def action_down(components='*', rm=False, **kwargs):
-    """
-    Bring a component down
-
-    Args:
-        components: list of components to bring down, this can also be the
-            string '*' for all
-        rm: bool, Whether to remove the container from docker
-
-    Returns:
-        None
-    """
-    ignored_args = kwargs
-    log = logging.getLogger("Down")
-    components_to_stop = components
-    config = get_config()
-    foreground_comp_name = None
-    if isinstance(components, str):
-        components = [components]
-    unnest_list(components)
-    if '*' in components:
-        components_to_stop = get_components(filter_list=components)
-    else:
-        components_to_stop = components
-    log.debug("Getting current list of containers")
-    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-    containers_dict = {}
-    for container in containers:
-        containers_dict[container['name']] = container
-    if 'foreground_component' in config:
-        foreground_comp_name = config['foreground_component']['name']
-    if foreground_comp_name:
-        if foreground_comp_name in components_to_stop:
-            components_to_stop.remove(foreground_comp_name)
-            components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
-            components_to_stop.append(foreground_comp_name)
-        else:
-            components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
-    else:
-        components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
-    components_to_stop.reverse()
-    for comp in components_to_stop:
-        comp_cont_name = '{}-devlab'.format(comp)
-        try:
-            if 'up' in containers_dict[comp_cont_name]['status'].lower():
-                log.info("Component: Stopping container: %s...", comp)
-                devlab_bench.helpers.docker.DOCKER.stop_container(comp_cont_name)
-            else:
-                log.info("Component: %s is already stopped. skipping...", comp)
-            if rm:
-                log.info("Removing container: %s", comp)
-                devlab_bench.helpers.docker.DOCKER.rm_container(comp_cont_name, force=True)
-        except KeyError:
-            log.info("Component: %s has no container. skipping...", comp)
-
-def action_restart(components='*', update_images=False, **kwargs):
-    """
-    Restart components by bringing them down and then back up again
-
-    Args:
-        update_images: bool, whether or not to try and update images that components rely upon
-    """
-    #restart
-    ignored_args = kwargs
-    log = logging.getLogger('Restart')
-    components_to_restart = components
-    rm = False
-    if isinstance(components, str):
-        components = [components]
-    unnest_list(components)
-    if '*' in components:
-        components_to_restart = get_components(filter_list=components)
-    else:
-        components_to_restart = components
-    if update_images:
-        rm = True
-    log.info("Bringing components DOWN")
-    action_down(components=components_to_restart, rm=rm)
-    log.info("Bringing components UP")
-    action_up(components=components_to_restart, update_images=update_images)
-
-def action_reset(targets='*', reset_wizard=False, full=False, **kwargs):
-    """
-    Reset a component/target
-
-    Args:
-        targets: list of components/targets to reset
-        reset_wizard: bool, Whether or not to remove files related with the
-            wizard to allow the wizard to prompt for the component again
-        full: bool, whether or not to completely reset everything, including
-            files in CONFIG.paths.reset_full
-
-    Returns:
-        None
-    """
-    ignored_args = kwargs
-    config = get_config()
-    log = logging.getLogger("Reset")
-    foreground_comp_name = None
-    if 'foreground_component' in config:
-        foreground_comp_name = config['foreground_component']['name']
-    add_foreground = False
-    if isinstance(targets, str):
-        targets = [targets]
-    unnest_list(targets)
-    if '*' in targets:
-        components_to_reset = get_components(filter_list=targets)
-    else:
-        components_to_reset = targets
-    components_to_reset = get_reset_components(targets)
-    all_components = get_reset_components('default')
-    if not config['components'] and not foreground_comp_name:
-        log.error("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
-        sys.exit(1)
-    if 'linux' in sys.platform.lower():
-        if os.geteuid() != 0:
-            log.info("Executing reset command from inside of a container")
-            cargs = []
-            cur_args = list(sys.argv[1:])
-            while cur_args:
-                arg = cur_args.pop(0)
-                #Ignore any previously passed project root
-                if arg.startswith('-'):
-                    if arg in ['-P', '--project-root']:
-                        cur_args.pop(0)
-                        continue
-                    cargs.append("'{}'".format(arg))
-                    if arg not in ['-v', '--version', '-h', '--help']:
-                        cargs.append("'{}'".format(cur_args.pop(0)))
-                else:
-                    #This indicates that we've reached the 'action'
-                    break
-            cargs.append('reset')
-            if reset_wizard:
-                cargs.append('--reset-wizard')
-            if full:
-                cargs.append('--full')
-            if isinstance(targets, list):
-                for carg in targets:
-                    cargs.append("'{}'".format(carg))
-            else:
-                cargs.append("'{}'".format(targets))
-            script_ret = devlab_bench.helpers.docker.DOCKER.run_container(
-                image='devlab_helper:latest',
-                name='devlab-reset',
-                network=config['network']['name'],
-                mounts=[
-                    '{}:/devlab'.format(devlab_bench.PROJ_ROOT),
-                    '{}/devlab:/usr/bin/devlab'.format(devlab_bench.DEVLAB_ROOT),
-                    '/var/run/docker.sock:/var/run/docker.sock'
-                ],
-                run_opts=['--rm', '--workdir', '/devlab'],
-                background=False,
-                interactive=True,
-                cmd='/usr/bin/devlab -P /devlab {}'.format(' '.join(cargs)),
-                ignore_nonzero_rc=True,
-                logger=log
-            )
-            if script_ret[0] != 0:
-                log.error('Execution of devlab reset command inside of container failed')
-                sys.exit(1)
-            return
-    if set(all_components) != set(components_to_reset):
-        if full:
-            log.error("You have passed specific components, in addition to --full. When using --full, ALL components are assumed")
-            sys.exit(1)
-    log.debug("Getting current list of containers")
-    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-    containers_dict = {}
-    for container in containers:
-        containers_dict[container['name']] = container
-    if foreground_comp_name in components_to_reset:
-        components_to_reset.remove(foreground_comp_name)
-        add_foreground = True
-    if 'devlab' in components_to_reset:
-        components_to_reset.remove('devlab') #Devlab isn't a REAL component, so ordinal stuff will fail
-        components_to_reset = get_ordinal_sorting(components_to_reset, config['components'])
-        components_to_reset.insert(0, 'devlab')
-    else:
-        components_to_reset = get_ordinal_sorting(components_to_reset, config['components'])
-    if add_foreground:
-        components_to_reset.insert(0, foreground_comp_name)
-    if full:
-        #Make sure the user is really REALLY sure
-        while True:
-            if 'reset_full' in config['paths']:
-                reset_full = ','.join(config['paths']['reset_full'])
-            else:
-                reset_full = 'Not Defined'
-            print("WARNING!! This will remove the files/directories '{}', as well as any files 'reset_paths' per component, and wizard files. If you have made any manual changes to files they will be erased!".format(reset_full))
-            ans = text_input("Are you sure you want to proceed? (yes/no) ")
-            ans = ans.lower()
-            if ans not in ['yes', 'no']:
-                print("Valid answers are 'yes' or 'no'")
-                continue
-            break
-        if ans == 'yes':
-            if not 'devlab' in components_to_reset:
-                components_to_reset.insert(0, 'devlab')
-            reset_wizard = True
-        else:
-            log.warning("Aborting!")
-            sys.exit(1)
-    components_to_reset.reverse()
-    for comp in components_to_reset:
-        reset_wizard_files = reset_wizard
-        if comp == 'devlab':
-            continue
-        if comp == foreground_comp_name:
-            log.info("Resetting files for foreground component: %s", foreground_comp_name)
-            comp_config = config['foreground_component']
-            comp_config['enabled'] = True
-        else:
-            comp_config = config['components'][comp]
-        if comp_config['enabled']:
-            action_down(components=[comp], rm=True)
-        else:
-            # Always reset wizard files for components that are disabled
-            reset_wizard_files = True
-        if reset_wizard_files:
-            log.info("Resetting wizard related files for component: '%s'", comp)
-            try:
-                for wpath in config['paths']['component_persistence_wizard_paths']:
-                    full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
-                        PROJ_ROOT=devlab_bench.PROJ_ROOT,
-                        comp_pers=config['paths']['component_persistence'],
-                        component=comp,
-                        path=wpath
-                    ).replace('..', '')
-                    log.debug("Looking to see if wizard related path exists: '%s'", full_path)
-                    if os.path.isfile(full_path):
-                        os.remove(full_path)
-                    if os.path.isdir(full_path):
-                        shutil.rmtree(full_path)
-            except KeyError:
-                pass
-        log.info("Resetting files for component: '%s'", comp)
-        try:
-            for rpath in comp_config['reset_paths']:
-                full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
-                    PROJ_ROOT=devlab_bench.PROJ_ROOT,
-                    comp_pers=config['paths']['component_persistence'],
-                    component=comp,
-                    path=rpath
-                ).replace('..', '')
-                log.debug("Looking to see if path exists: '%s'", full_path)
-                if os.path.isfile(full_path):
-                    log.debug("Removing file: '%s'", full_path)
-                    os.remove(full_path)
-                if os.path.isdir(full_path):
-                    log.debug("Removing directory: '%s'", full_path)
-                    shutil.rmtree(full_path)
-        except KeyError:
-            pass
-    if 'devlab' in components_to_reset:
-        log.info("Resetting devlab specific files")
-        try:
-            for rpath in config['paths']['reset_paths']:
-                full_path = '{PROJ_ROOT}/{path}'.format(
-                    PROJ_ROOT=devlab_bench.PROJ_ROOT,
-                    path=rpath
-                ).replace('..', '')
-                log.debug("Looking to see if path exists: '%s'", full_path)
-                if os.path.isfile(full_path):
-                    log.debug("Removing file: '%s'", full_path)
-                    os.remove(full_path)
-                if os.path.isdir(full_path):
-                    log.debug("Removing directory: '%s'", full_path)
-                    shutil.rmtree(full_path)
-        except KeyError:
-            pass
-    if full:
-        log.info("Resetting paths for 'full' reset")
-        try:
-            for fpath in config['paths']['reset_full']:
-                full_path = '{PROJ_ROOT}/{path}'.format(
-                    PROJ_ROOT=devlab_bench.PROJ_ROOT,
-                    path=fpath
-                ).replace('..', '')
-                if os.path.isdir(full_path):
-                    shutil.rmtree(full_path)
-                if os.path.isfile(full_path):
-                    log.debug("Removing file: '%s'", full_path)
-                    os.remove(full_path)
-        except KeyError:
-            pass
-
-def action_shell(components='*', adhoc_image=None, adhoc_name=None, command=None, user=None, **kwargs):
-    """
-    Execute a shell or a command inside of a component
-
-    Args:
-        adhoc_image: string of the image to use for adhoc shell action
-        adhoc_name: string of the name to use for the container's name
-        components: string or list of the component(s) to shell or execute
-            a command on. If more than one component is specified then run the
-            command on them sequentially
-        command: string of the command to run. Optional. Default=None
-        user: string of the user to execute the shell command as
-    Returns:
-        None
-    """
-    ignored_args = kwargs
-    log = logging.getLogger("Shell")
-    if isinstance(components, str):
-        components = [components]
-    unnest_list(components)
-    if '*' in components:
-        components_dst = get_shell_components(filter_list=components)
-    else:
-        components_dst = components
-    if isinstance(command, list):
-        command = ' '.join(command)
-    config = get_config()
-    #Remove duplicates
-    components_dst = list(sorted(set(components_dst)))
-    for component in components_dst:
-        if not command:
-            try:
-                command = config['components'][component]['shell']
-            except KeyError:
-                command = '/bin/bash'
-        ignore_nonzero_rc = bool(command.endswith('/bin/bash') or command.endswith('/bin/sh'))
-        if component != 'adhoc':
-            log.debug("Getting current list of containers")
-            containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-            containers_dict = {}
-            for container in containers:
-                containers_dict[container['name']] = container
-            container_names = [cntr['name'] for cntr in containers]
-            log.debug("Current list of containers: '%s'", ', '.join(container_names))
-            try:
-                if 'up' not in containers_dict['{}-devlab'.format(component)]['status'].lower():
-                    log.error("Component: %s is not currently running. Aborting", component)
-                    sys.exit(1)
-            except KeyError:
-                log.error("Container %s-devlab doesn't currently exist for component: %s. Try doing an 'up' action first? Aborting", component, component)
-        else:
-            if not (command.startswith('helper_container|') or command.startswith('running_container|')):
-                log.debug("Building adhoc command...")
-                adhoc_image_parsed = parse_docker_image_string(adhoc_image)
-                log.debug("Adhoc image tag: %s", adhoc_image_parsed['tag'])
-                if adhoc_image_parsed['host']:
-                    adhoc_image_parsed['host'] += '/'
-                    adhoc_config = {
-                        'components': {
-                            'adhoc': {
-                                'image': adhoc_image
-                            }
-                        }
-                    }
-                    if check_custom_registry(['adhoc'], adhoc_config, logger=log):
-                        log.error("Please make sure you have logged into needed custom docker registries")
-                        sys.exit(1)
-                else:
-                    adhoc_image_parsed['host'] = ''
-                if not adhoc_name:
-                    adhoc_name = adhoc_image_parsed['bare_image']
-                    adhoc_name = '{}-adhoc'.format(adhoc_name.replace('/', '_').strip('_'))
-                command = 'helper_container|{host}{bare_image}^{tag}^{adhoc_name}: {command}'.format(adhoc_name=adhoc_name, command=command, **adhoc_image_parsed)
-                log.debug("Built adhoc command: '%s'", command)
-        script_runner(command, '{}-devlab'.format(component), log=log, ignore_nonzero_rc=ignore_nonzero_rc, user=user)
 
 def action_global_status(**kwargs):
     """
@@ -483,367 +115,6 @@ def action_global_status(**kwargs):
         print('')
     sys.exit(0)
 
-def action_status(**kwargs):
-    """
-    Generates a status of the local devlab environment
-    """
-    ignored_args = kwargs
-    log = logging.getLogger("Status")
-    config = get_config()
-    foreground_comp_name = None
-    if 'foreground_component' in config:
-        foreground_comp_name = config['foreground_component']['name']
-    log.debug("Getting current list of devlab containers")
-    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-    containers_dict = {}
-    for container in containers:
-        containers_dict[container['name']] = container
-    container_names = [cntr['name'] for cntr in containers]
-    log.debug("Getting list of configured components")
-    cur_components = get_components()
-    try:
-        if foreground_comp_name in cur_components:
-            cur_components.remove(foreground_comp_name)
-            components = get_ordinal_sorting(cur_components, config['components'])
-            components.append(foreground_comp_name)
-        else:
-            components = get_ordinal_sorting(cur_components, config['components'])
-    except KeyError:
-        components = []
-    if not components:
-        if container_names:
-            log.warning("Found orphaned containers: %s", ', '.join(container_names))
-            log.warning("It is recommended that you run: 'docker rm -f %s'", ' '.join(container_names))
-        else:
-            log.info("No components have been configured. Try running with the 'up' action or the 'wizard' script directly")
-        sys.exit(1)
-    existing_components = list(
-        name[0:len(name)-7] for name in list(
-            filter(
-                lambda cnt_n: cnt_n.endswith('-devlab'), container_names
-            )
-        )
-    )
-    running_components = list()
-    stopped_components = list()
-    missing_components = list()
-    for comp in components:
-        try:
-            if 'up' in containers_dict['{}-devlab'.format(comp)]['status'].lower():
-                running_components.append(comp)
-            else:
-                stopped_components.append(comp)
-        except KeyError:
-            missing_components.append(comp)
-    orphaned_components = list(set(existing_components) - set(components))
-    if orphaned_components:
-        log.warning("There are orphaned containers: '%s'", ', '.join(orphaned_components))
-        log.warning("It is recommended that you run: 'docker rm -f %s'", ' '.join(orphaned_components))
-    log.debug("Configured components: '%s'", ', '.join(components))
-    log.debug("Current list of running devlab containers: '%s'", ', '.join(container_names))
-    log.debug("Current list of all components that exist: '%s'", ', '.join(existing_components))
-    log.debug("Current running components: '%s'", ', '.join(running_components))
-    log.debug("Building tables")
-    status_table = []
-    links_table = []
-    #Generate Header for Status table
-    status_header = {
-        'component': 'Component',
-        'container_name': 'Container Name',
-        'status': 'Status',
-        'health': 'Health',
-        'local_port': 'Docker exposed'
-    }
-    status_header_format = "| {component:^16} | {container_name:^22} | {status:^8} | {health:^20} | {local_port:^14} |"
-    status_row_format = "| {component:16} | {container_name:22} | {status:8} | {health:^20} | {local_port:14} |"
-    status_width = len(status_header_format.format(**status_header))
-    status_table_bar = '{{:-<{}}}'.format(status_width)
-    status_table.append(status_table_bar.format(''))
-    status_table.append(status_header_format.format(**status_header))
-    status_table.append(status_table_bar.format(''))
-    #Generate Header for Links table
-    links_header = {
-        'component': 'Component',
-        'link': 'Link(s)',
-        'comment': 'Comment'
-    }
-    links_header_format = "| {component:^16} | {link:^40} | {comment:^65} |"
-    links_row_format = "| {component:16} | {link:40} | {comment:65} |"
-    links_width = len(links_header_format.format(**links_header))
-    links_table_bar = '{{:-<{}}}'.format(links_width)
-    links_table.append(links_table_bar.format(''))
-    links_table.append(links_header_format.format(**links_header))
-    links_table.append(links_table_bar.format(''))
-    host_ip = get_primary_ip()
-    #Print rows
-    for comp in components:
-        status_row = {
-            'component': comp,
-            'container_name': '',
-            'health': 'unknown',
-            'local_port': ''
-        }
-        format_fillers = {
-            'container_name': None,
-            'host_ip': host_ip,
-            'local_port': None
-        }
-        status_dict = {}
-        status_ports = []
-        if comp in existing_components:
-            status_row['container_name'] = '{}-devlab'.format(comp)
-            format_fillers['container_name'] = status_row['container_name']
-        if comp in running_components:
-            try:
-                first_port = True
-                for port in config['components'][comp]['ports']:
-                    local_port = parse_docker_local_ports(port)
-                    if first_port:
-                        status_row['local_port'] = local_port
-                        first_port = False
-                    else:
-                        status_ports.append({
-                            'component': '',
-                            'container_name': '',
-                            'health': '',
-                            'status': '',
-                            'local_port': local_port
-                        })
-            except KeyError:
-                status_row['local_port'] = ''
-            format_fillers['local_port'] = status_row['local_port'].split('(')[0]
-            status_row['status'] = 'up'
-            status_script = ''
-            try:
-                status_script = config['components'][comp]['status_script']
-                if status_script:
-                    log.debug("Found status script: '%s'", status_script)
-            except KeyError:
-                try:
-                    status_script = config['foreground_component']['status_script']
-                except KeyError:
-                    log.debug("Skipping status script for component: '%s' as none is defined", comp)
-                    if format_fillers['local_port']:
-                        status_row['health'] = 'healthy'
-                        for port in config['components'][comp]['ports']:
-                            if 'udp' in port:
-                                continue
-                            port = parse_docker_local_ports(port)
-                            log.debug("Performing basic port check on '%s', port '%s', for health check", comp, port)
-                            if not port_check('127.0.0.1', format_fillers['local_port'].split('-')[0].split('(')[0]):
-                                log.warning("Basic port status check failed for '%s', port '%s'", comp, port)
-                                status_row['health'] = 'degraded'
-                            else:
-                                log.debug("Basic port status check successful for '%s', port '%s'", comp, port)
-            if status_script:
-                script_ret = script_runner(status_script, name=status_row['container_name'], interactive=False, log_output=False)
-                if script_ret[0] != 0:
-                    log.warning("Errors occurred executing status script for component: '%s' Skipping!!", comp)
-                else:
-                    try:
-                        status_dict = json.loads(' '.join(script_ret[1]))
-                    except json.decoder.JSONDecodeError:
-                        log.warning("Status script: '%s' did NOT return valid JSON for component: '%s', Skipping!!", status_script, comp)
-                try:
-                    status_row['health'] = status_dict['status']['health']
-                except KeyError:
-                    pass
-                try:
-                    first_link = True
-                    for link in status_dict['links']:
-                        #Fill in any values as results from links support string formatting
-                        link = {k: v.format(**format_fillers) for k, v in link.items()}
-                        if first_link:
-                            links_table.append(links_row_format.format(component=comp, **link))
-                            first_link = False
-                        else:
-                            links_table.append(links_row_format.format(component='', **link))
-                except KeyError:
-                    pass
-        elif comp in stopped_components:
-            status_row['status'] = 'stopped'
-        else:
-            status_row['status'] = 'missing'
-        status_table.append(status_row_format.format(**status_row))
-        for status_port in status_ports:
-            status_table.append(status_row_format.format(**status_port))
-    #Generate Footers
-    status_table.append(status_table_bar.format(''))
-    links_table.append(links_table_bar.format(''))
-    print('\n## COMPONENT STATUS ##')
-    print('\n'.join(status_table))
-    print('')
-    if len(links_table) > 4:
-        print('## LINKS ##')
-        print('\n'.join(links_table))
-
-def action_up(components='*', skip_provision=False, bind_to_host=False, keep_up_on_error=False, update_images=False, **kwargs): #pylint: disable=too-many-branches,too-many-statements
-    """
-    This is responsible for the "up" action, intended to bring up different components
-
-    Args:
-        components: list of components to start, this can also be the string *
-        skip_provision: bool whether or not the privisioning scripts should be
-            skipped when starting up components. Default=False
-        bind_to_host: bool whether or not we should spin things up against
-            that other systems on your host's network will be able to easily
-            work with the spun up components. Default=False
-        update_images: bool, whether or not images should be updated with fresh
-            layers etc... from docker repo/registry
-    Returns:
-        None
-    """
-    up_env = {
-        'HOST_IP': get_primary_ip(),
-        'BIND_TO_HOST': bind_to_host
-    }
-    ignored_args = kwargs
-    log = logging.getLogger("Run/Up")
-    components_to_run = components
-    errors = 0
-    base_to_build = []
-    runtime_to_build = []
-    force_reprov = False
-    reprovisionable_components = []
-    foreground_comp_name = None
-    config = get_config()
-    up_env_file = '{}/{}/devlab_up.env'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence'])
-    if 'reprovisionable_components' in config:
-        reprovisionable_components = config['reprovisionable_components']
-    if 'foreground_component' in config:
-        foreground_comp_name = config['foreground_component']['name']
-    if isinstance(components, str):
-        components = [components]
-    unnest_list(components)
-    if '*' in components:
-        components_to_run = get_shell_components(filter_list=components)
-    else:
-        components_to_run = components
-    log.debug("Components passed: '%s', components_to_run: '%s'", components, components_to_run)
-    for comp in components_to_run:
-        if comp == foreground_comp_name:
-            continue
-        if not config['components'][comp]['enabled']:
-            log.error("Component: '%s' is not enabled/configured. Aborting", comp)
-            sys.exit(1)
-    if foreground_comp_name in components_to_run:
-        components_to_run.remove(foreground_comp_name)
-        components_to_run = get_ordinal_sorting(components_to_run, config['components'])
-        components_to_run.append(foreground_comp_name)
-    else:
-        components_to_run = get_ordinal_sorting(components_to_run, config['components'])
-    log.debug("The following components will be started in this order: %s", ', '.join(components_to_run))
-    if update_images:
-        log.info("Looking for and updating images needed by components: %s", ','.join(components_to_run))
-        update_component_images(components=components_to_run)
-    needed_images = get_needed_images()
-    if needed_images['base_images']['missing'] or needed_images['base_images']['needs_update']:
-        base_to_build = needed_images['base_images']['missing'] + needed_images['base_images']['needs_update']
-        log.debug("Images: '%s' not found in list of current images", base_to_build)
-        if needed_images['base_images']['needs_update']:
-            log.info("Found newer dockerfile(s), will update the following base images: %s", ','.join(needed_images['base_images']['needs_update']))
-        log.info("Need to build some base images before trying to start containers")
-        devlab_bench.actions.build.action(images=base_to_build, docker_helper=devlab_bench.helpers.docker.DOCKER)
-    if config['network']['name']:
-        network_status = docker_obj_status(config['network']['name'], 'network', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
-        if network_status['exists'] and not network_status['owned']:
-            log.error("Conflicting custom network found! There is already a docker network defined with this name, but is not owned by this project")
-            sys.exit(1)
-        if not network_status['exists']:
-            log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
-            devlab_bench.helpers.docker.DOCKER.create_network(**config['network'])
-    if needed_images['runtime_images']['missing'] or needed_images['runtime_images']['needs_update']:
-        runtime_to_build = needed_images['runtime_images']['missing'] + needed_images['runtime_images']['needs_update']
-        log.debug("Runtime Images: '%s' not found in list of current images", runtime_to_build)
-        log.info("Need to build some runtime images before trying to start containers")
-        if needed_images['runtime_images']['needs_update']:
-            log.info("Found newer dockerfile(s), will update the following runtime images: %s", ','.join(needed_images['runtime_images']['needs_update']))
-        devlab_bench.actions.build.action(images=runtime_to_build, docker_helper=devlab_bench.helpers.docker.DOCKER)
-    if not os.path.isdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence'])):
-        os.mkdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence']))
-    if os.path.isfile(up_env_file):
-        prev_env = get_env_from_file(up_env_file)
-        if prev_env['BIND_TO_HOST'] != up_env['BIND_TO_HOST']:
-            log.warning("Previous devlab environment was stood up with --bind-to-host set to: %s. Starting with the --bind-to-host set to: %s anyway", prev_env['BIND_TO_HOST'], prev_env['BIND_TO_HOST'])
-            up_env['BIND_TO_HOST'] = prev_env['BIND_TO_HOST']
-    else:
-        prev_env = dict(up_env)
-    if bind_to_host:
-        primary_ip = up_env['HOST_IP']
-        prev_primary_ip = prev_env['HOST_IP']
-        if primary_ip != prev_primary_ip:
-            log.warning("Your host's IP Address has changed from: %s to %s. This means we must re-provision components", prev_primary_ip, primary_ip)
-            force_reprov = True
-    log.debug("Saving this devlab's environment")
-    save_env_file(up_env, up_env_file, force_upper_keys=True)
-    log.debug("Getting current list of containers")
-    containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-    container_names = [cntr['name'] for cntr in containers]
-    # Check for any images that depend on custom registry and prompt if missing auth
-    if check_custom_registry(components_to_run, config, logger=log):
-        log.error("Please make sure you have logged into needed custom docker registries")
-        sys.exit(1)
-    log.debug("Current list of containers: '%s'", ', '.join(container_names))
-    for comp in components_to_run:
-        if comp == foreground_comp_name:
-            continue
-        comp_cont_name = '{}-devlab'.format(comp)
-        cont_status = docker_obj_status(comp_cont_name, 'container', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
-        if cont_status['exists'] and not cont_status['owned']:
-            log.error("Container: '%s' already exists, but is NOT owned by this project!", comp_cont_name)
-            break
-        if update_images:
-            if cont_status['exists']:
-                log.warning("Container: '%s' exists, and we just updated containers, You'll need to restart the container to USE the new image", comp)
-        if comp_cont_name in container_names:
-            #See if we should reprovision the existing container
-            for r_comp in reprovisionable_components:
-                if comp.startswith(r_comp):
-                    if force_reprov:
-                        log.warning("Removing and resetting data in existing container: '%s' as it needs to be reprovisioned", comp_cont_name)
-                        action_reset(comp)
-                        log.debug("Refreshing current list of containers")
-                        containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-        cup_ret = component_up(
-            name=comp,
-            comp_config=config['components'][comp],
-            skip_provision=skip_provision,
-            keep_up_on_error=keep_up_on_error,
-            current_containers=containers,
-            network=config['network']['name'],
-            logger=log
-        )
-        if not cup_ret:
-            errors += 1
-            break
-    if errors == 0:
-        if foreground_comp_name:
-            if foreground_comp_name in components_to_run:
-                del config['foreground_component']['name']
-                log.info("Starting the main foreground component: %s", foreground_comp_name)
-                fup_ret = component_up(
-                    name=foreground_comp_name,
-                    comp_config=config['foreground_component'],
-                    skip_provision=True,
-                    keep_up_on_error=keep_up_on_error,
-                    current_containers=containers,
-                    network=config['network']['name'],
-                    background=False,
-                    logger=log
-                )
-                if not fup_ret:
-                    errors += 1
-                action_down()
-    if errors > 0:
-        sys.exit(errors)
-    if update_images:
-        log.info("Cleaning up any dangling images")
-        pi_res = devlab_bench.helpers.docker.DOCKER.prune_images(prune_all=True)
-        if pi_res[0] != 0:
-            log.error("Failed cleaning(pruning) images")
-        else:
-            log.debug("Successfully cleaned up(pruned) images")
-
 def action_update(uninstall=False, set_version=None, **kwargs):
     """
     Use the installer to try and update devlab to the latest version in the repo
@@ -873,177 +144,6 @@ def action_update(uninstall=False, set_version=None, **kwargs):
         sys.exit(1)
     sys.exit(0)
 
-def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False, current_containers=None, background=True, network=None, logger=None):
-    """
-    Bring a component up
-    """
-    comp = name
-    comp_cont_name = '{}-devlab'.format(comp)
-    containers_dict = {}
-    errors = False
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('component_up')
-    if not current_containers:
-        log.debug("Getting current list of containers")
-        current_containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-    for container in current_containers:
-        containers_dict[container['name']] = container
-    container_names = [cntr['name'] for cntr in current_containers]
-    new_container = True
-    while True:
-        if comp_cont_name in container_names:
-            if 'up' in containers_dict[comp_cont_name]['status'].lower():
-                log.info("Component: %s is already running. Skipping...", comp)
-                break
-            else:
-                log.info("Component: %s has already been created, Starting container...", comp)
-                devlab_bench.helpers.docker.DOCKER.start_container(comp_cont_name)
-                new_container = False
-        if new_container:
-            if 'mounts' in comp_config:
-                mount_list = []
-                for mount in comp_config['mounts']:
-                    if mount[0] != '/':
-                        mount_list.append('{}/{}'.format(devlab_bench.PROJ_ROOT, mount))
-                    else:
-                        mount_list.append(mount)
-                comp_config['mounts'] = list(mount_list)
-            if 'run_opts' not in comp_config:
-                comp_config['run_opts'] = list()
-            if 'pre_scripts' in comp_config:
-                for script in comp_config['pre_scripts']:
-                    log.debug("Found Pre script: '%s'", script)
-                    script_ret = script_runner(script, name=comp_cont_name, log=log)
-                    if script_ret[0] != 0:
-                        errors = True
-                        break
-                if errors:
-                    break
-            log.info("Starting component: %s", comp)
-            if not background:
-                comp_config['run_opts'].append('--rm')
-            run_ret = devlab_bench.helpers.docker.DOCKER.run_container(
-                name=comp_cont_name,
-                network=network,
-                background=background,
-                interactive=not background,
-                log_output=False,
-                **comp_config
-            )
-            if run_ret[0] == 0:
-                log.debug("Successfully started component: '%s' as container: '%s'", comp, comp_cont_name)
-            else:
-                log.error("FAILED to start component: '%s' as container: '%s'. Aborting...", comp, comp_cont_name)
-                if not keep_up_on_error:
-                    action_down(components=[comp], rm=True)
-                errors = True
-                break
-            if 'scripts' in comp_config and not skip_provision:
-                for script in comp_config['scripts']:
-                    log.debug("Found provisioning script: '%s'", script)
-                    script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
-                    if script_ret[0] != 0:
-                        if not keep_up_on_error:
-                            action_down(components=[comp], rm=True)
-                        errors = True
-                        break
-                if errors:
-                    if not keep_up_on_error:
-                        action_down(components=[comp], rm=True)
-                    break
-        if 'post_up_scripts' in comp_config and background:
-            for script in comp_config['post_up_scripts']:
-                log.debug("Found Post up script: '%s'", script)
-                script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
-                if script_ret[0] != 0:
-                    errors = True
-                    break
-            if errors:
-                break
-        break
-    return not errors
-
-def get_env_from_file(env_file):
-    """
-    This reads the file 'env_file' and tries to convert a bash ENV style format
-    to a dict... for example:
-        MY_VAR='hello'
-        OTHER_VAR='world'
-    Would become:
-        {
-            'MY_VAR': 'hello',
-            'OTHER_VAR': 'world'
-        }
-
-    Returns:
-        Generated Dictionary
-    """
-    conf = {}
-    if os.path.isfile(env_file):
-        with open(env_file, 'r') as efile:
-            for line in efile:
-                line = line.strip()
-                line_split = line.split('=')
-                key = line_split[0]
-                val = '='.join(line_split[1:])
-                #Strip off enclosing quotes
-                for qot in ('"', "'"):
-                    if val[0] == qot:
-                        val = val[1:]
-                        val = val[:-1]
-                if val.lower() in ('true', 'false'):
-                    val = val.lower()
-                    if val == 'true': #pylint: disable=simplifiable-if-statement
-                        val = True
-                    else:
-                        val = False
-                conf[key] = val
-    return conf
-
-def get_primary_ip():
-    """
-    Gets the IP address of whichever interface has a default route
-
-    Based on: https://stackoverflow.com/a/28950776
-    """
-    broadcast_nets = (
-        '10.255.255.255',
-        '172.31.255.255',
-        '192.168.255.255',
-        '172.30.255.1'      #This would be the hosts ip for our docker network
-    )
-    ip = '127.0.0.1'
-    for bnet in broadcast_nets:
-        skt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # Doesn't have to be directly reachable
-            skt.connect((bnet, 1))
-            ip = skt.getsockname()[0]
-            break
-        except: #pylint: disable=bare-except
-            pass
-        finally:
-            skt.close()
-    return ip
-
-def get_reset_components(filter_list):
-    """
-    Wrapper for get_components so that argparse can check against custome shell
-    specific virtual components
-    """
-    match_virtual = True
-    if len(filter_list) == 1:
-        if filter_list[0] == 'default':
-            filter_list = ['*']
-            match_virtual = False
-    elif filter_list == 'default':
-        filter_list = ['*']
-        match_virtual = False
-    res = get_components(filter_list=filter_list, virtual_components=('devlab',), match_virtual=match_virtual)
-    return res
-
 def get_runtime_images():
     """
     Try to get a list of available runtime images
@@ -1056,13 +156,6 @@ def get_runtime_images():
     runtime_images = list(config['runtime_images'].keys())
     runtime_images.sort()
     return runtime_images
-
-def get_shell_components(filter_list):
-    """
-    Wrapper for get_components so that argparse can check against custome shell
-    specific virtual components
-    """
-    return get_components(filter_list=filter_list, virtual_components=('adhoc',))
 
 def load_json_config(config_path):
     """
@@ -1121,81 +214,6 @@ def logging_init(level):
                 )
             )
 
-def unnest_list(to_unnest, sort=True):
-    """
-    Take a potential list of lists of strings and convert to a single list of strings
-
-    Args:
-        to_unnest: list to work on
-
-    Returns:
-        None (the list passed it modified in-place)
-    """
-    # Make sure that if nested list is passed we unwrap them
-    for nst in list(to_unnest):
-        if isinstance(nst, list):
-            to_unnest += nst
-            to_unnest.remove(nst)
-    if sort:
-        to_unnest = sorted(set(to_unnest))
-
-def update_component_images(components=None, logger=None):
-    """
-    Look through given components and try to build or pull new versions of the
-    image layers etc...
-
-    Args:
-        components: list, of components to use for finding images to update
-        logger: Logger object to use for log messages
-
-    Returns:
-        None
-    """
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('update_images')
-    log.debug('Looking up images being referenced in components')
-    needed_images = get_needed_images(components, logger=log)
-    ext_images = needed_images['external_images']['exists'] + needed_images['external_images']['missing']
-    int_images = needed_images['base_images']['exists'] + needed_images['base_images']['missing']
-    int_images += needed_images['runtime_images']['exists'] + needed_images['runtime_images']['missing']
-    log_output = True
-    log.info("Building/Updating devlab and project's managed images: '%s'", ','.join(int_images))
-    devlab_bench.actions.build.action(int_images, docker_helper=devlab_bench.helpers.docker.DOCKER, clean=True, pull=True)
-    for ext_image in ext_images:
-        log.info("Pulling down any updates to image: '%s'", ext_image)
-        pi_res = devlab_bench.helpers.docker.DOCKER.pull_image(ext_image, log_output=log_output, logger=log)
-        if pi_res[0] != 0:
-            log.error("Failed pulling updates for image: %s", ext_image)
-            sys.exit(1)
-
-def save_env_file(config_dict, dst_file, force_upper_keys=False):
-    """
-    This takes a simple, single level dict and tries to write it out to
-    'dst_file' in a bash style env file. For example:
-        {
-            'MY_VAR': 'hello',
-            'OTHER_VAR': 'world',
-            'lower_var': 'foobar'
-        }
-    Would become a file with the contents of:
-        MY_VAR="hello"
-        OTHER_VAR="world"
-        lower_var="foobar"
-    If force_upper_keys is set, then the key 'lower_var' would become LOWER_VAR
-    """
-    with open(dst_file, 'w') as dfile:
-        for key in config_dict:
-            val = config_dict[key]
-            if force_upper_keys:
-                key = key.upper()
-            if val in [True, False]:
-                val = str(val).lower()
-            else:
-                val = '"{}"'.format(val)
-            dfile.write('{}={}\n'.format(key, val))
-
 def set_default_action(args, subparser):
     """
     Look at the args passed and determine if there is a subparser action set for
@@ -1219,143 +237,6 @@ def set_default_action(args, subparser):
     if not action_exists:
         args_passed.append('none')
     return args_passed
-
-def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_output=False, log=None, user=None):
-    """
-    This takes a delvab script string, and executes it inside containers
-
-    Args:
-        script: string of the command. There are optional prefixes for the string:
-            PREFIXES:
-                'helper_container|<IMAGE_NAME^TAG^CONTAINER_NAME>: <SCRIPT>'
-                    This will execute the SCRIPT inside of a new container of
-                    IMAGE_NAME with TAG, with the name CONTAINER_NAME
-                'running_container|<CONTAINER>: <SCRIPT>'
-                    This will execute the SCRIPT inside of the already running
-                    CONTAINER
-        name: string of the name of the container that this script is related
-            to. So a script without a PREFIX, is run inside of this container
-            name.
-        ignore_nonzero_rc: bool indicating whether errors should create logs
-        interactive: bool, whether to run in "interactive" mode or not
-        log: Logger object that will be processing logs. Default=None
-
-    Returns:
-        tuple where:
-            First Element is the return code of the command
-            Second Element is either a list of str
-    """
-    if not log:
-        log = logging.getLogger("ScriptRunner-{}".format(name))
-    script_parse = script_runner_parse(script)
-    cimg = script_parse['cimg']
-    if script_parse['name']:
-        name = script_parse['name']
-    script = script_parse['script']
-    script_mode = script_parse['mode']
-    script_split = [quote(script_arg) for script_arg in shlex.split(script)]
-    script_stripped = []
-    script_run_opts = []
-    if user:
-        script_run_opts.append('--user')
-        script_run_opts.append(user)
-        script_run_opts.append('--workdir')
-        script_run_opts.append('/root')
-    script_end_env = False
-    for script_arg in script_split:
-        if '=' in script_arg:
-            if not script_end_env:
-                log.debug("Found environment variable for script: '%s'", script_arg)
-                script_run_opts.append('-e')
-                script_run_opts.append(script_arg)
-                continue
-        script_stripped.append(script_arg)
-        script_end_env = True
-    log.debug("Full command, including environment variables: '%s'", script)
-    script_stripped = ' '.join(script_stripped)
-    if script_mode == 'helper_container':
-        script_run_opts.insert(0, '--rm')
-        ctag = 'latest'
-        if '^' in cimg:
-            cimg_split = cimg.split('^')
-            cimg = cimg_split[0]
-            if cimg_split[1]:
-                ctag = cimg_split[1]
-            name = cimg
-            if len(cimg_split) > 2:
-                name = cimg_split[2]
-            log.debug("Found tag: %s for image: %s. Container name will be: %s", ctag, cimg, name)
-        log.info("Executing command: '%s' inside of new container: '%s', using image: '%s:%s'", script_stripped, name, cimg, ctag)
-        script_ret = devlab_bench.helpers.docker.DOCKER.run_container(
-            image='{}:{}'.format(cimg, ctag),
-            name=name,
-            network=devlab_bench.CONFIG['network']['name'],
-            mounts=[
-                '{}:/devlab'.format(devlab_bench.PROJ_ROOT)
-            ],
-            background=False,
-            interactive=interactive,
-            cmd=script_stripped,
-            ignore_nonzero_rc=ignore_nonzero_rc,
-            logger=log,
-            run_opts=script_run_opts,
-            log_output=log_output
-        )
-    else:
-        log.info("Executing command: '%s' inside of container: %s", script_stripped, name)
-        script_ret = devlab_bench.helpers.docker.DOCKER.exec_cmd(
-            name=name,
-            background=False,
-            interactive=interactive,
-            cmd=script_stripped,
-            ignore_nonzero_rc=ignore_nonzero_rc,
-            logger=log,
-            exec_opts=script_run_opts,
-            log_output=log_output
-        )
-    return script_ret
-
-def script_runner_parse(script):
-    """
-    Take a script runner syntax and split it depending on mode etc... if needed
-
-    Args:
-        script: String in the format of a script runner syntax
-
-    Returns:
-        Dict of the results
-    """
-    parts_dict = {
-        'cimg': '',
-        'name': '',
-        'script': script,
-        'mode': ''
-    }
-    if script.startswith('helper_container|') or script.startswith('running_container|'):
-        #Strip off the mode
-        script_mode_split = script.split('|')
-        parts_dict['mode'] = script_mode_split.pop(0)
-        #Recombine script with the mode stripped off
-        script = '|'.join(script_mode_split)
-        #Find image
-        script_split = script.split(':')
-        name = script_split[0]
-        if '.' in name:
-            if is_valid_hostname(name):
-                try:
-                    next_slash_split = script_split[1].split('/')
-                    host_port_check = re.match(r'[0-9]{2,}', next_slash_split[0])
-                    if host_port_check:
-                        name = '{}:{}/{}'.format(name, host_port_check.string, '/'.join(next_slash_split[1:]))
-                        script_split[0] = name
-                        del script_split[1]
-                        script = ':'.join(script_split)
-                except IndexError:
-                    pass
-        parts_dict['name'] = name
-        parts_dict['cimg'] = name
-        parts_dict['script'] = script[1+len(name):].strip()
-    return parts_dict
 
 ##- Main -##
 if __name__ == '__main__':
@@ -1383,7 +264,7 @@ if __name__ == '__main__':
     PARSER_DOWN = SUBPARSERS.add_parser('down', help='Bring down components')
     PARSER_DOWN.add_argument('components', nargs='*', default='*', type=get_components, help='Bring down the specific component(s) or glob matches to bring down. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_DOWN.add_argument('--rm', '-r', action='store_true', help="Don't just bring the component down, but also delete the container")
-    PARSER_DOWN.set_defaults(func=action_down)
+    PARSER_DOWN.set_defaults(func=devlab_bench.actions.down.action)
 
     #Add Subparser for shell action
     PARSER_SHELL = SUBPARSERS.add_parser('sh', help='Execute a shell command inside of a component/container')
@@ -1392,14 +273,14 @@ if __name__ == '__main__':
     PARSER_SHELL.add_argument('--adhoc-name', '-n', default=None, help='When using the \'adhoc\' component, use this name for the container.')
     PARSER_SHELL.add_argument('--command', '-c', nargs=argparse.REMAINDER, help='Optional command to run instead of an interactive shell')
     PARSER_SHELL.add_argument('--user', '-u', default=None, help='Optional user to run the command/shell as')
-    PARSER_SHELL.set_defaults(func=action_shell)
+    PARSER_SHELL.set_defaults(func=devlab_bench.actions.shell.action)
 
     #Add Subparser for reset action
     PARSER_RESET = SUBPARSERS.add_parser('reset', help='Reset a specific component, getting rid of all data including persistent data. This is useful if you want to have a component start from scratch without re-running the wizard')
-    PARSER_RESET.add_argument('targets', nargs='*', default='default', type=get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(CUR_COMPONENTS + ['devlab'])))
+    PARSER_RESET.add_argument('targets', nargs='*', default='default', type=devlab_bench.actions.reset.get_reset_components, help='Reset the specific target(s) or glob matches. * means all components, but this does NOT inlcude other targets like \'devlab\'. TARGETS: {}'.format(', '.join(CUR_COMPONENTS + ['devlab'])))
     PARSER_RESET.add_argument('--reset-wizard', '-r', action='store_true', help='Also remove wizard related files so that the wizard will run again for the specified component')
     PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES IN PATHS DEFINED IN YOUR \'paths.reset_full\'!!')
-    PARSER_RESET.set_defaults(func=action_reset)
+    PARSER_RESET.set_defaults(func=devlab_bench.actions.reset.action)
 
     #Add Subparser for global_status action
     PARSER_GLOBAL_STATUS = SUBPARSERS.add_parser('global-status', help='Get a global status of all environments where devlab has created containers')
@@ -1407,7 +288,7 @@ if __name__ == '__main__':
 
     #Add Subparser for status action
     PARSER_STATUS = SUBPARSERS.add_parser('status', help='Get a status of the environment')
-    PARSER_STATUS.set_defaults(func=action_status)
+    PARSER_STATUS.set_defaults(func=devlab_bench.actions.status.action)
 
     #Add Subparser for up action
     PARSER_UP = SUBPARSERS.add_parser('up', help='Bring up components')
@@ -1416,7 +297,7 @@ if __name__ == '__main__':
     PARSER_UP.add_argument('--skip-provision', '-k', action='store_true', help='Bring up the components but don\'t run any scripts')
     PARSER_UP.add_argument('--keep-up-on-error', '-K', action='store_true', help='Whether to keep a component container running even if it encounters errors during provisioning scripts etc...')
     PARSER_UP.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones when bringing them "up"')
-    PARSER_UP.set_defaults(func=action_up)
+    PARSER_UP.set_defaults(func=devlab_bench.actions.up.action)
 
     # Add subparser for update action
     PARSER_UPDATE = SUBPARSERS.add_parser('update', help='Update devlab to the latest released version')
@@ -1428,7 +309,7 @@ if __name__ == '__main__':
     PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
     PARSER_RESTART.add_argument('components', nargs='*', default='*', type=get_components, help='Stop and start a specific component(s) or glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
     PARSER_RESTART.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones')
-    PARSER_RESTART.set_defaults(func=action_restart)
+    PARSER_RESTART.set_defaults(func=devlab_bench.actions.restart.action)
 
     #Parse our args
     try:
@@ -1456,7 +337,7 @@ if __name__ == '__main__':
     if not devlab_bench.PROJ_ROOT:
         #Running Adhoc without a project won't get us a DockerHelper object.
         #this will create one if none has been set.
-        if ARGS.func == action_shell and ARGS.components == ['adhoc']:
+        if ARGS.func == devlab_bench.actions.shell.action and ARGS.components == ['adhoc']:
             devlab_bench.PROJ_ROOT = os.path.abspath('.')
             devlab_bench.helpers.docker.DOCKER = DockerHelper(
                 labels=[
@@ -1470,7 +351,7 @@ if __name__ == '__main__':
                 }
             }
             # Run the adhoc function
-            ARGS.func(**vars(ARGS), docker_helper=devlab_bench.helpers.docker.DOCKER)
+            ARGS.func(**vars(ARGS))
             sys.exit(0)
         else:
             LOGGER.error("Aborting... could not determine project root. Please create a DevlabConfig.json or DevlabConfig.yaml etc...")
@@ -1480,7 +361,7 @@ if __name__ == '__main__':
     devlab_bench.CONFIG = get_config()
 
     #If we're doing an 'up' action, check for and run wizard
-    if ARGS.func == action_up:
+    if ARGS.func == devlab_bench.actions.up.action:
         if devlab_bench.CONFIG['wizard_enabled']:
             if os.path.isfile('{}/wizard'.format(devlab_bench.PROJ_ROOT)):
                 LOGGER.debug("Running wizard, in case it needs to be run")
@@ -1515,4 +396,4 @@ if __name__ == '__main__':
     os.chdir(devlab_bench.PROJ_ROOT)
 
     #Run the action function
-    ARGS.func(**vars(ARGS), docker_helper=devlab_bench.helpers.docker.DOCKER)
+    ARGS.func(**vars(ARGS))

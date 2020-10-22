@@ -10,7 +10,7 @@ from devlab_bench import DEVLAB_ROOT, IMAGES, PROJ_ROOT
 from devlab_bench.helpers.common import get_config, get_ordinal_sorting
 from devlab_bench.helpers.docker import docker_obj_status, DockerHelper, get_needed_images
 
-def action(images='*', docker_helper=None, clean=False, no_cache=False, pull=False, **kwargs):
+def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
     """
     This is responsible for building all the docker images etc...
 
@@ -38,6 +38,7 @@ def action(images='*', docker_helper=None, clean=False, no_cache=False, pull=Fal
     config = get_config()
     base_images_dict = dict(IMAGES)
     images_dict = dict(base_images_dict)
+    docker_helper = devlab_bench.helpers.docker.DOCKER
     docker_helper_base = DockerHelper(
         labels=[
             'com.lab.type=devlab'

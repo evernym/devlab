@@ -197,6 +197,43 @@ def get_config(force_reload=False, fallback_default=False):
     devlab_bench.CONFIG.update(loaded_config)
     return devlab_bench.CONFIG
 
+def get_env_from_file(env_file):
+    """
+    This reads the file 'env_file' and tries to convert a bash ENV style format
+    to a dict... for example:
+        MY_VAR='hello'
+        OTHER_VAR='world'
+    Would become:
+        {
+            'MY_VAR': 'hello',
+            'OTHER_VAR': 'world'
+        }
+
+    Returns:
+        Generated Dictionary
+    """
+    conf = {}
+    if os.path.isfile(env_file):
+        with open(env_file, 'r') as efile:
+            for line in efile:
+                line = line.strip()
+                line_split = line.split('=')
+                key = line_split[0]
+                val = '='.join(line_split[1:])
+                #Strip off enclosing quotes
+                for qot in ('"', "'"):
+                    if val[0] == qot:
+                        val = val[1:]
+                        val = val[:-1]
+                if val.lower() in ('true', 'false'):
+                    val = val.lower()
+                    if val == 'true': #pylint: disable=simplifiable-if-statement
+                        val = True
+                    else:
+                        val = False
+                conf[key] = val
+    return conf
+
 def get_ordinal_sorting(components, config_components):
     """
     Go through the components in the list 'components', and generate a
@@ -247,6 +284,32 @@ def get_ordinal_sorting(components, config_components):
     log.debug("Sorted components by ordinal: '%s'", ', '.join(ordinal_sorted))
     return ordinal_sorted
 
+def get_primary_ip():
+    """
+    Gets the IP address of whichever interface has a default route
+
+    Based on: https://stackoverflow.com/a/28950776
+    """
+    broadcast_nets = (
+        '10.255.255.255',
+        '172.31.255.255',
+        '192.168.255.255',
+        '172.30.255.1'      #This would be the hosts ip for our docker network
+    )
+    ip = '127.0.0.1'
+    for bnet in broadcast_nets:
+        skt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Doesn't have to be directly reachable
+            skt.connect((bnet, 1))
+            ip = skt.getsockname()[0]
+            break
+        except: #pylint: disable=bare-except
+            pass
+        finally:
+            skt.close()
+    return ip
+
 def get_proj_root(start_dir=None):
     """
     Try and determine the project's root path
@@ -282,6 +345,13 @@ def get_proj_root(start_dir=None):
         if cur_dir == '/':
             cur_dir = None
     return cur_dir
+
+def get_shell_components(filter_list):
+    """
+    Wrapper for get_components so that argparse can check against custom shell
+    specific virtual components
+    """
+    return get_components(filter_list=filter_list, virtual_components=('adhoc',))
 
 def is_valid_hostname(hostname):
     """
@@ -330,28 +400,183 @@ def port_check(host, port, timeout=2):
     finally:
         skt.close()
 
-#def set_config(config):
-#    """
-#    Set's the global config to the 'config'
-#
-#    Args:
-#        config: dict
-#
-#    Returns:
-#        None
-#    """
-#    global CONFIG
-#    CONFIG = config
-#
-#def set_proj_root(proj_root):
-#    """
-#    Set's the global PROJ_ROOT to 'proj_root'
-#
-#    Args:
-#        proj_root: str of the patht to the project's root
-#
-#    Returns:
-#        None
-#    """
-#    global PROJ_ROOT
-#    PROJ_ROOT = proj_root
+def save_env_file(config_dict, dst_file, force_upper_keys=False):
+    """
+    This takes a simple, single level dict and tries to write it out to
+    'dst_file' in a bash style env file. For example:
+        {
+            'MY_VAR': 'hello',
+            'OTHER_VAR': 'world',
+            'lower_var': 'foobar'
+        }
+    Would become a file with the contents of:
+        MY_VAR="hello"
+        OTHER_VAR="world"
+        lower_var="foobar"
+    If force_upper_keys is set, then the key 'lower_var' would become LOWER_VAR
+    """
+    with open(dst_file, 'w') as dfile:
+        for key in config_dict:
+            val = config_dict[key]
+            if force_upper_keys:
+                key = key.upper()
+            if val in [True, False]:
+                val = str(val).lower()
+            else:
+                val = '"{}"'.format(val)
+            dfile.write('{}={}\n'.format(key, val))
+
+def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_output=False, log=None, user=None):
+    """
+    This takes a delvab script string, and executes it inside containers
+
+    Args:
+        script: string of the command. There are optional prefixes for the string:
+            PREFIXES:
+                'helper_container|<IMAGE_NAME^TAG^CONTAINER_NAME>: <SCRIPT>'
+                    This will execute the SCRIPT inside of a new container of
+                    IMAGE_NAME with TAG, with the name CONTAINER_NAME
+                'running_container|<CONTAINER>: <SCRIPT>'
+                    This will execute the SCRIPT inside of the already running
+                    CONTAINER
+        name: string of the name of the container that this script is related
+            to. So a script without a PREFIX, is run inside of this container
+            name.
+        ignore_nonzero_rc: bool indicating whether errors should create logs
+        interactive: bool, whether to run in "interactive" mode or not
+        log: Logger object that will be processing logs. Default=None
+
+    Returns:
+        tuple where:
+            First Element is the return code of the command
+            Second Element is either a list of str
+    """
+    if not log:
+        log = logging.getLogger("ScriptRunner-{}".format(name))
+    script_parse = script_runner_parse(script)
+    cimg = script_parse['cimg']
+    if script_parse['name']:
+        name = script_parse['name']
+    script = script_parse['script']
+    script_mode = script_parse['mode']
+    script_split = [quote(script_arg) for script_arg in shlex.split(script)]
+    script_stripped = []
+    script_run_opts = []
+    if user:
+        script_run_opts.append('--user')
+        script_run_opts.append(user)
+        script_run_opts.append('--workdir')
+        script_run_opts.append('/root')
+    script_end_env = False
+    for script_arg in script_split:
+        if '=' in script_arg:
+            if not script_end_env:
+                log.debug("Found environment variable for script: '%s'", script_arg)
+                script_run_opts.append('-e')
+                script_run_opts.append(script_arg)
+                continue
+        script_stripped.append(script_arg)
+        script_end_env = True
+    log.debug("Full command, including environment variables: '%s'", script)
+    script_stripped = ' '.join(script_stripped)
+    if script_mode == 'helper_container':
+        script_run_opts.insert(0, '--rm')
+        ctag = 'latest'
+        if '^' in cimg:
+            cimg_split = cimg.split('^')
+            cimg = cimg_split[0]
+            if cimg_split[1]:
+                ctag = cimg_split[1]
+            name = cimg
+            if len(cimg_split) > 2:
+                name = cimg_split[2]
+            log.debug("Found tag: %s for image: %s. Container name will be: %s", ctag, cimg, name)
+        log.info("Executing command: '%s' inside of new container: '%s', using image: '%s:%s'", script_stripped, name, cimg, ctag)
+        script_ret = devlab_bench.helpers.docker.DOCKER.run_container(
+            image='{}:{}'.format(cimg, ctag),
+            name=name,
+            network=devlab_bench.CONFIG['network']['name'],
+            mounts=[
+                '{}:/devlab'.format(devlab_bench.PROJ_ROOT)
+            ],
+            background=False,
+            interactive=interactive,
+            cmd=script_stripped,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            logger=log,
+            run_opts=script_run_opts,
+            log_output=log_output
+        )
+    else:
+        log.info("Executing command: '%s' inside of container: %s", script_stripped, name)
+        script_ret = devlab_bench.helpers.docker.DOCKER.exec_cmd(
+            name=name,
+            background=False,
+            interactive=interactive,
+            cmd=script_stripped,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+            logger=log,
+            exec_opts=script_run_opts,
+            log_output=log_output
+        )
+    return script_ret
+
+def script_runner_parse(script):
+    """
+    Take a script runner syntax and split it depending on mode etc... if needed
+
+    Args:
+        script: String in the format of a script runner syntax
+
+    Returns:
+        Dict of the results
+    """
+    parts_dict = {
+        'cimg': '',
+        'name': '',
+        'script': script,
+        'mode': ''
+    }
+    if script.startswith('helper_container|') or script.startswith('running_container|'):
+        #Strip off the mode
+        script_mode_split = script.split('|')
+        parts_dict['mode'] = script_mode_split.pop(0)
+        #Recombine script with the mode stripped off
+        script = '|'.join(script_mode_split)
+        #Find image
+        script_split = script.split(':')
+        name = script_split[0]
+        if '.' in name:
+            if is_valid_hostname(name):
+                try:
+                    next_slash_split = script_split[1].split('/')
+                    host_port_check = re.match(r'[0-9]{2,}', next_slash_split[0])
+                    if host_port_check:
+                        name = '{}:{}/{}'.format(name, host_port_check.string, '/'.join(next_slash_split[1:]))
+                        script_split[0] = name
+                        del script_split[1]
+                        script = ':'.join(script_split)
+                except IndexError:
+                    pass
+        parts_dict['name'] = name
+        parts_dict['cimg'] = name
+        parts_dict['script'] = script[1+len(name):].strip()
+    return parts_dict
+
+def unnest_list(to_unnest, sort=True):
+    """
+    Take a potential list of lists of strings and convert to a single list of strings
+
+    Args:
+        to_unnest: list to work on
+
+    Returns:
+        None (the list passed it modified in-place)
+    """
+    # Make sure that if nested list is passed we unwrap them
+    for nst in list(to_unnest):
+        if isinstance(nst, list):
+            to_unnest += nst
+            to_unnest.remove(nst)
+    if sort:
+        to_unnest = sorted(set(to_unnest))
