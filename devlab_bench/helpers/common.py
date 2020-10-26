@@ -6,6 +6,7 @@ import fnmatch
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import socket
@@ -346,6 +347,19 @@ def get_proj_root(start_dir=None):
             cur_dir = None
     return cur_dir
 
+def get_runtime_images():
+    """
+    Try to get a list of available runtime images
+    """
+    config = get_config()
+    if 'runtime_images' not in config:
+        config = get_config(fallback_default=True)
+        if 'runtime_images' not in config:
+            return []
+    runtime_images = list(config['runtime_images'].keys())
+    runtime_images.sort()
+    return runtime_images
+
 def get_shell_components(filter_list):
     """
     Wrapper for get_components so that argparse can check against custom shell
@@ -376,6 +390,53 @@ def is_valid_hostname(hostname):
          and not label.startswith("-") and not label.endswith("-") # no bordering hyphens
          and not disallowed.search(label)) # contains only legal characters
         for label in hostname.split("."))
+
+def logging_init(level='info'):
+    """
+    Initialize and set log level
+    level is a String of one of:
+        'debug'
+        'info'
+        'warning'
+        'error'
+        'critical'
+        'notset'
+    Colorizing was combining multiple ideas in the answers from:
+        https://stackoverflow.com/q/384076
+    """
+    black, red, green, yellow, blue, magenta, cyan, white = range(8) # pylint: disable=unused-variable
+    level_colors = {
+        logging.WARNING  : 30 + yellow,
+        logging.INFO     : 30 + green,
+        logging.DEBUG    : 30 + white,
+        logging.CRITICAL : 30 + yellow,
+        logging.ERROR    : 40 + red
+    }
+    sequences = {
+        'reset': "\033[0m",
+        'color': "\033[1;%dm",
+        'bold' : "\033[1m"
+    }
+    #Initialize logging
+    try:
+        log_level = int(level)
+    except ValueError:
+        log_level = devlab_bench.LOGGING_LEVELS[level.lower()]
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    #Setup ANSI coloring for the log level name
+    if platform.system() != 'Windows' and devlab_bench.ISATTY:
+        for l_level in level_colors:
+            logging.addLevelName(
+                l_level,
+                "{bold}{color_seq}{level_name}{reset}".format(
+                    color_seq=sequences['color'] % level_colors[l_level],
+                    level_name=logging.getLevelName(l_level),
+                    **sequences
+                )
+            )
 
 def port_check(host, port, timeout=2):
     """

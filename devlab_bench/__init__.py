@@ -2,6 +2,7 @@
 Module constructor
 """
 import os
+import logging
 from devlab_bench.helpers import YAML_SUPPORT, ISATTY
 from devlab_bench.helpers.common import get_proj_root
 
@@ -41,5 +42,13 @@ CONFIG_DEF = {
     },
     'reprovisionable_components': [],
     'runtime_images': {}
+}
+LOGGING_LEVELS = {
+    'debug': logging.DEBUG,
+    'info': logging.INFO,
+    'warning': logging.WARNING,
+    'error': logging.ERROR,
+    'critical': logging.CRITICAL,
+    'notset': logging.NOTSET
 }
 PROJ_ROOT = get_proj_root()

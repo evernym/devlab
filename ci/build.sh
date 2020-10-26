@@ -57,6 +57,7 @@ fi
 mkdir -p build/devlab
 
 #Copy in the executable
+cp -r devlab_bench/ build/devlab/
 cp devlab build/devlab/
 cp installer.py build/devlab/
 chmod a+rx build/devlab/devlab

@@ -41,6 +41,7 @@ LOGGING_LEVELS = {
     'notset': logging.NOTSET
 }
 PARSER = None
+DEVLAB_MODULE_NAME = 'devlab_bench'
 
 ## Classes
 class FileIndexParser(HTMLParser, object): #pylint: disable=abstract-method
@@ -107,6 +108,9 @@ def action_install(repo_path, set_version=None, **kwargs):
         homedir = os.path.expanduser('~')
         log.info("Successfully downloaded package, attempting to extract package to: %s/devlab", homedir)
         try:
+            if os.path.isdir('{}/devlab/{}'.format(homedir, DEVLAB_MODULE_NAME)):
+                log.info("Cleaning up old devlab module")
+                shutil.rmtree('{}/devlab/{}'.format(homedir, DEVLAB_MODULE_NAME))
             tarball = BytesIO(data)
             tar_file = tarfile.open(fileobj=tarball)
             tar_file.extractall(path=homedir)

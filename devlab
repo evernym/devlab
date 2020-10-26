@@ -4,16 +4,14 @@
 Main script for managing the devlab environment stack
 """
 import argparse
-import json
 import logging
 import os
-import platform
 import sys
 
 import devlab_bench.actions
 import devlab_bench
 from devlab_bench.helpers.command import Command
-from devlab_bench.helpers.common import get_components, get_config, get_shell_components
+from devlab_bench.helpers.common import get_components, get_config, get_runtime_images, get_shell_components, logging_init
 from devlab_bench.helpers.docker import DockerHelper
 from devlab_bench.exceptions import DevlabComponentError
 
@@ -21,14 +19,6 @@ from devlab_bench.exceptions import DevlabComponentError
 ARGS = None
 PARSER = None
 LOGGER = None
-LOGGING_LEVELS = {
-    'debug': logging.DEBUG,
-    'info': logging.INFO,
-    'warning': logging.WARNING,
-    'error': logging.ERROR,
-    'critical': logging.CRITICAL,
-    'notset': logging.NOTSET
-}
 __VERSION__ = 'master'
 
 ##- Functions -##
@@ -39,180 +29,6 @@ def action_default(**kwargs):
     """
     ignored_args = kwargs
     PARSER.parse_args(['-h'])
-
-def action_global_status(**kwargs):
-    """
-    Generates a global status of all environments spun up with devlab
-    """
-    ignored_args = kwargs
-    global_devlab_docker = DockerHelper(
-        filter_label='com.lab.type=devlab'
-    )
-    containers = global_devlab_docker.get_containers()[1]
-    status_by_project = {}
-    status_header = {
-        'container_name': 'Container Name',
-        'status': 'Status',
-        'local_port': 'Docker exposed'
-    }
-    status_table_head = []
-    status_header_format = "| {container_name:^21} | {status:^10} | {local_port:^32} |"
-    status_row_format = "| {container_name:21} | {status:10} | {local_port:32} |"
-    status_width = len(status_header_format.format(**status_header))
-    status_table_bar = '{{:-<{}}}'.format(status_width)
-    status_table_head.append(status_table_bar.format(''))
-    status_table_head.append(status_header_format.format(**status_header))
-    status_table_head.append(status_table_bar.format(''))
-    for cont in containers:
-        first_port = True
-        exposed_ports = False
-        status_row = {
-            'container_name': cont['name'],
-            'status': '',
-            'local_port': ''
-        }
-        rows = []
-        state = cont['status']
-        details = global_devlab_docker.inspect_container(cont['name'])[0]
-        labels = details['Config']['Labels']
-        container_project = 'ORPHANED (Unknown project origin)'
-        for label in labels:
-            if label == 'com.lab.project':
-                container_project = labels[label]
-                break
-        if 'up' in state.lower():
-            status_row['status'] = 'up'
-        else:
-            status_row['status'] = 'stopped'
-        for port in details['HostConfig']['PortBindings']:
-            exposed_ports = True
-            cont_port, port_proto = port.split('/')
-            host_port = details['HostConfig']['PortBindings'][port][0]['HostPort']
-            port_str = 'Host: {host_port}({proto}) -> Cont: {cont_port}'.format(proto=port_proto, host_port=host_port, cont_port=cont_port)
-            if first_port:
-                status_row['local_port'] = port_str
-                rows.append(status_row)
-                first_port = False
-            else:
-                rows.append({
-                    'container_name': '',
-                    'status': '',
-                    'local_port': port_str
-                })
-        if not exposed_ports:
-            rows.append(status_row)
-        try:
-            status_by_project[container_project] += rows
-        except KeyError:
-            status_by_project[container_project] = []
-            status_by_project[container_project] += rows
-    for project in status_by_project:
-        print("##\n## Project: \n##  {}\n##".format(project))
-        print('\n'.join(status_table_head))
-        for row in status_by_project[project]:
-            print(status_row_format.format(**row))
-        print(status_table_bar.format(''))
-        print('')
-    sys.exit(0)
-
-def action_update(uninstall=False, set_version=None, **kwargs):
-    """
-    Use the installer to try and update devlab to the latest version in the repo
-
-    Args:
-        uninstall: bool, indicating to uninstall instead of update
-        set_version: str, indicating a specific version of devlab to install
-
-    Returns:
-        None (In fact this function should call sys.exit)
-    """
-    ignored_args = kwargs
-    log = logging.getLogger("Run/Up")
-    log.debug("Running installer.py to check for updates etc...")
-    command = '{}/installer.py'.format(devlab_bench.DEVLAB_ROOT)
-    args = []
-    if uninstall and set_version:
-        log.error("Cannot uninstall a specific version. Uninstall takes no argument")
-        sys.exit(1)
-    if uninstall:
-        args.append('uninstall')
-    if set_version:
-        args += ['install', '--set-version', set_version]
-    inst_out = Command(command, args, interactive=True).run()
-    if inst_out[0] != 0:
-        log.error("Installer did not exit successfully... Aborting!")
-        sys.exit(1)
-    sys.exit(0)
-
-def get_runtime_images():
-    """
-    Try to get a list of available runtime images
-    """
-    config = get_config()
-    if 'runtime_images' not in config:
-        config = get_config(fallback_default=True)
-        if 'runtime_images' not in config:
-            return []
-    runtime_images = list(config['runtime_images'].keys())
-    runtime_images.sort()
-    return runtime_images
-
-def load_json_config(config_path):
-    """
-    Load the json config file at 'config_path' and return the dict
-    """
-    config = {}
-    if os.path.isfile(config_path):
-        with open(config_path, 'r') as cfile:
-            config = json.load(cfile)
-    return config
-
-def logging_init(level):
-    """
-    Initialize and create initial LOGGER
-    level is a String of one of:
-        'debug'
-        'info'
-        'warning'
-        'error'
-        'critical'
-        'notset'
-    Colorizing was combining multiple ideas in the answers from:
-        https://stackoverflow.com/q/384076
-    """
-    black, red, green, yellow, blue, magenta, cyan, white = range(8) # pylint: disable=unused-variable
-    level_colors = {
-        logging.WARNING  : 30 + yellow,
-        logging.INFO     : 30 + green,
-        logging.DEBUG    : 30 + white,
-        logging.CRITICAL : 30 + yellow,
-        logging.ERROR    : 40 + red
-    }
-    sequences = {
-        'reset': "\033[0m",
-        'color': "\033[1;%dm",
-        'bold' : "\033[1m"
-    }
-    #Initialize logging
-    try:
-        log_level = int(level)
-    except ValueError:
-        log_level = LOGGING_LEVELS[level.lower()]
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    #Setup ANSI coloring for the log level name
-    if platform.system() != 'Windows' and devlab_bench.ISATTY:
-        for l_level in level_colors:
-            logging.addLevelName(
-                l_level,
-                "{bold}{color_seq}{level_name}{reset}".format(
-                    color_seq=sequences['color'] % level_colors[l_level],
-                    level_name=logging.getLevelName(l_level),
-                    **sequences
-                )
-            )
 
 def set_default_action(args, subparser):
     """
@@ -243,7 +59,7 @@ if __name__ == '__main__':
     CUR_COMPONENTS = get_components()
     #Top level parser
     PARSER = argparse.ArgumentParser(description='Main interface for devlab')
-    PARSER.add_argument('--log-level', '-l', choices=list(LOGGING_LEVELS.keys()), default='info', help='Set the log-level output')
+    PARSER.add_argument('--log-level', '-l', choices=list(devlab_bench.LOGGING_LEVELS.keys()), default='info', help='Set the log-level output')
     PARSER.add_argument('--version', '-v', action='store_true', help='Display the version of devlab and exit')
     PARSER.add_argument('--project-root', '-P', default=None, help='Force project root to a specific path instead of searching for DevlabConfig.json/DevlabConfig.yaml etc...')
     SUBPARSERS = PARSER.add_subparsers(help='Actions')
@@ -284,7 +100,7 @@ if __name__ == '__main__':
 
     #Add Subparser for global_status action
     PARSER_GLOBAL_STATUS = SUBPARSERS.add_parser('global-status', help='Get a global status of all environments where devlab has created containers')
-    PARSER_GLOBAL_STATUS.set_defaults(func=action_global_status)
+    PARSER_GLOBAL_STATUS.set_defaults(func=devlab_bench.actions.global_status.action)
 
     #Add Subparser for status action
     PARSER_STATUS = SUBPARSERS.add_parser('status', help='Get a status of the environment')
@@ -303,7 +119,7 @@ if __name__ == '__main__':
     PARSER_UPDATE = SUBPARSERS.add_parser('update', help='Update devlab to the latest released version')
     PARSER_UPDATE.add_argument('--uninstall', '-U', action='store_true', help='Instead of updating using the installer, uninstall it')
     PARSER_UPDATE.add_argument('--set-version', '-V', default=None, help='Update/Downgrade to a specific version of devlab')
-    PARSER_UPDATE.set_defaults(func=action_update)
+    PARSER_UPDATE.set_defaults(func=devlab_bench.actions.update.action)
 
     # Add subparser for restart
     PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
@@ -328,7 +144,7 @@ if __name__ == '__main__':
 
     #The 'update' action is special and doesn't need all of the checks or a devlab_bench.PROJ_ROOT etc..
     #it also will exit after executing
-    if ARGS.func in [action_update, action_global_status, action_default]:
+    if ARGS.func in [devlab_bench.actions.update.action, devlab_bench.actions.global_status.action, action_default]:
         ARGS.func(**vars(ARGS))
 
     if ARGS.project_root:
