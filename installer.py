@@ -101,9 +101,17 @@ def action_install(repo_path, set_version=None, **kwargs):
         else:
             log.info("You already have the latest version!")
             sys.exit(0)
-    log.info("Downloading version: %s....", set_version)
-    status, data = http_request(packages[set_version]['path'], decode=False, logger=log)
-    log.info("Downloading done. Status=%s size=%s", status, len(data))
+    if os.path.isfile(packages[set_version]['path']):
+        log.info("Loading package version from filesystem: %s...", set_version)
+        status = True
+        data = b''
+        with open(packages[set_version]['path'], 'r') as pfile:
+            data = pfile.read()
+        log.info("Loading done. size=%s", len(data))
+    else:
+        log.info("Downloading version: %s...", set_version)
+        status, data = http_request(packages[set_version]['path'], decode=False, logger=log)
+        log.info("Downloading done. Status=%s size=%s", status, len(data))
     if status:
         homedir = os.path.expanduser('~')
         log.info("Successfully downloaded package, attempting to extract package to: %s/devlab", homedir)
@@ -262,6 +270,7 @@ def find_cur_version():
         str
     """
     log = logging.getLogger('find_cur_version')
+    cwd = os.getcwd()
     os.chdir(
         os.path.expanduser('~')
     )
@@ -278,6 +287,7 @@ def find_cur_version():
                     cur_version = line.split('=')[1].strip(" '\"\n")
                     break
                 line = dfile.readline()
+    os.chdir(cwd)
     return cur_version
 
 def http_request(url, headers=None, payload=None, insecure=False, decode=True, logger=None):
@@ -417,8 +427,9 @@ def list_packages(path, logger):
     else:
         if not os.path.isdir(path):
             log.error("Repo path is not found: %s", path)
+            sys.exit(1)
         else:
-            log.warning("This feature has not been implemented yet")
+            found_files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
     for file_found in found_files:
         name, ext = os.path.splitext(
             os.path.basename(file_found)
