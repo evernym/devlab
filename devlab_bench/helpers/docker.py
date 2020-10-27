@@ -591,7 +591,7 @@ class DockerHelper(object):
 ###-- Functions --###
 def check_build_image_need_update(image, dockerfile, logger=None):
     """
-    Determing if an image needs to be updated based on a dockerfile's
+    Determine if an image needs to be updated based on a dockerfile's
     'last_modified' label. If there is no last_modified label in the dockerfile
     then return will be False.
 

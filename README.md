@@ -218,6 +218,9 @@ All Keys that are in **bold** are required
 | build_opts | List of Strings | Additional options to pass to the `docker build` command. Each CLI arg must be it's own element. For example: `[ '--build-arg', 'foo=bar' ]` would become `docker build --build-arg foo=bar PATH...` etc... |
 | ordinal | Hash | This is used indicate the order of the images to build. When parallel execution is supported, the `group` key indicates the image that can be built at the same time, `number` indicates the order inside the group to start up |
 
+_**[NOTE]**_ Devlab supports a special label (`last_modified`).
+If this label is present in the `docker_file`, then everytime that the devlab project is brought `up`, it will check that the value of the label in the docker image matches the value of `last_modified` in the `docker_file`. If they are different then devlab will rebuild the image. This allows you to ensure that updates to the `docker_file`'s in your runtime images, result in the users of your project getting updated images.
+
 ## Script Runner Syntax
 The general format of a Script Runner formatted string is:
 ```
