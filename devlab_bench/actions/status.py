@@ -3,11 +3,12 @@ Things dealing with the 'status' action
 """
 import json
 import logging
+import os
 import sys
 
 import devlab_bench.helpers.docker
 from devlab_bench.helpers.docker import parse_docker_local_ports
-from devlab_bench.helpers.common import get_components, get_config, get_primary_ip, get_ordinal_sorting, port_check, script_runner
+from devlab_bench.helpers.common import get_components, get_config, get_env_from_file, get_primary_ip, get_ordinal_sorting, port_check, script_runner
 
 def action(**kwargs):
     """
@@ -53,7 +54,28 @@ def action(**kwargs):
     running_components = list()
     stopped_components = list()
     missing_components = list()
+    if os.path.isfile(devlab_bench.UP_ENV_FILE):
+        up_env = get_env_from_file(devlab_bench.UP_ENV_FILE)
     for comp in components:
+        if comp == foreground_comp_name:
+            comp_type = config['foreground_component'].get('type', 'container')
+        else:
+            comp_type = config['components'][comp].get('type', 'container')
+        if comp_type == 'host':
+            if up_env.get('{}_PID'.format(comp.upper()), None):
+                comp_pid = up_env.get('{}_PID'.format(comp.upper()), None)
+                if comp_pid:
+                    log.debug('Found pid in devlab up environemnt file for comp: %s, pid: %s', comp, comp_pid)
+                    try:
+                        os.kill(int(comp_pid), 0)
+                    except OSError:
+                        stopped_components.append(comp)
+                    else:
+                        running_components.append(comp)
+                else:
+                    missing_components.append(comp)
+            else:
+                stopped_components.append(comp)
         try:
             if 'up' in containers_dict['{}-devlab'.format(comp)]['status'].lower():
                 running_components.append(comp)
@@ -116,10 +138,16 @@ def action(**kwargs):
         }
         status_dict = {}
         status_ports = []
+        if comp == foreground_comp_name:
+            comp_type = config['foreground_component'].get('type', 'container')
+        else:
+            comp_type = config['components'][comp].get('type', 'container')
         if comp in existing_components:
             status_row['container_name'] = '{}-devlab'.format(comp)
             format_fillers['container_name'] = status_row['container_name']
         if comp in running_components:
+            if comp_type == 'host':
+                status_row['container_name'] = 'N/A (cmd on host)'
             try:
                 first_port = True
                 for port in config['components'][comp]['ports']:

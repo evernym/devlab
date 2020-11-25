@@ -196,6 +196,7 @@ def get_config(force_reload=False, fallback_default=False):
                         sys.exit(1)
                     break
     devlab_bench.CONFIG.update(loaded_config)
+    devlab_bench.UP_ENV_FILE = '{}/{}/devlab_up.env'.format(devlab_bench.PROJ_ROOT, devlab_bench.CONFIG['paths'].get('component_persistence', ''))
     return devlab_bench.CONFIG
 
 def get_env_from_file(env_file):
@@ -500,6 +501,8 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
                 'running_container|<CONTAINER>: <SCRIPT>'
                     This will execute the SCRIPT inside of the already running
                     CONTAINER
+                'host: <SCRIPT'
+                    This will execute the SCRIPT on your local host
         name: string of the name of the container that this script is related
             to. So a script without a PREFIX, is run inside of this container
             name.
@@ -523,6 +526,7 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
     script_split = [quote(script_arg) for script_arg in shlex.split(script)]
     script_stripped = []
     script_run_opts = []
+    env_map = {}
     if user:
         script_run_opts.append('--user')
         script_run_opts.append(user)
@@ -535,10 +539,13 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
                 log.debug("Found environment variable for script: '%s'", script_arg)
                 script_run_opts.append('-e')
                 script_run_opts.append(script_arg)
+                e_var, e_val = script_arg.split('=')
+                env_map[e_var] = e_val
                 continue
         script_stripped.append(script_arg)
         script_end_env = True
     log.debug("Full command, including environment variables: '%s'", script)
+    script_split = script_stripped
     script_stripped = ' '.join(script_stripped)
     if script_mode == 'helper_container':
         script_run_opts.insert(0, '--rm')
@@ -568,6 +575,17 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
             run_opts=script_run_opts,
             log_output=log_output
         )
+    elif script_mode == 'host':
+        log.info("Executing command: '%s' on local host", script_stripped)
+        script_ret = devlab_bench.helpers.command.Command(
+            script_split[0],
+            args=script_split[1:],
+            env=env_map,
+            use_shell=True,
+            logger=log,
+            log_output=True,
+            ignore_nonzero_rc=ignore_nonzero_rc,
+        ).run()
     else:
         log.info("Executing command: '%s' inside of container: %s", script_stripped, name)
         script_ret = devlab_bench.helpers.docker.DOCKER.exec_cmd(
@@ -622,6 +640,13 @@ def script_runner_parse(script):
         parts_dict['name'] = name
         parts_dict['cimg'] = name
         parts_dict['script'] = script[1+len(name):].strip()
+    elif script.startswith('!!') or script.startswith('host:'):
+        parts_dict['mode'] = 'host'
+        if script.startswith('!'):
+            script = script[2:]
+        else:
+            script = script[5:]
+        parts_dict['script'] = script.strip()
     return parts_dict
 
 def unnest_list(to_unnest, sort=True):

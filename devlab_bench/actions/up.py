@@ -1,14 +1,16 @@
 """
 Things dealing with the 'up' action
 """
+import json
 import logging
 import os
+import shlex
 import sys
 
 import devlab_bench
 import devlab_bench.actions.reset
 from devlab_bench.helpers.docker import get_needed_images, docker_obj_status, check_custom_registry
-from devlab_bench.helpers.common import get_config, get_env_from_file, get_ordinal_sorting, get_shell_components, get_primary_ip, save_env_file, script_runner, unnest_list
+from devlab_bench.helpers.common import get_config, get_env_from_file, get_ordinal_sorting, get_shell_components, get_primary_ip, quote, save_env_file, script_runner, unnest_list
 
 def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_error=False, update_images=False, **kwargs): #pylint: disable=too-many-branches,too-many-statements
     """
@@ -40,7 +42,6 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
     reprovisionable_components = []
     foreground_comp_name = None
     config = get_config()
-    up_env_file = '{}/{}/devlab_up.env'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence'])
     if 'reprovisionable_components' in config:
         reprovisionable_components = config['reprovisionable_components']
     if 'foreground_component' in config:
@@ -94,8 +95,8 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
         devlab_bench.actions.build.action(images=runtime_to_build)
     if not os.path.isdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence'])):
         os.mkdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence']))
-    if os.path.isfile(up_env_file):
-        prev_env = get_env_from_file(up_env_file)
+    if os.path.isfile(devlab_bench.UP_ENV_FILE):
+        prev_env = get_env_from_file(devlab_bench.UP_ENV_FILE)
         if prev_env['BIND_TO_HOST'] != up_env['BIND_TO_HOST']:
             log.warning("Previous devlab environment was stood up with --bind-to-host set to: %s. Starting with the --bind-to-host set to: %s anyway", prev_env['BIND_TO_HOST'], prev_env['BIND_TO_HOST'])
             up_env['BIND_TO_HOST'] = prev_env['BIND_TO_HOST']
@@ -108,7 +109,7 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
             log.warning("Your host's IP Address has changed from: %s to %s. This means we must re-provision components", prev_primary_ip, primary_ip)
             force_reprov = True
     log.debug("Saving this devlab's environment")
-    save_env_file(up_env, up_env_file, force_upper_keys=True)
+    save_env_file(up_env, devlab_bench.UP_ENV_FILE, force_upper_keys=True)
     log.debug("Getting current list of containers")
     containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
     container_names = [cntr['name'] for cntr in containers]
@@ -153,11 +154,16 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
     if errors == 0:
         if foreground_comp_name:
             if foreground_comp_name in components_to_run:
-                del config['foreground_component']['name']
+                #Make a copy of the foreground component's configuration without the 'name' key
+                comp_config = json.loads(
+                    json.dumps(config['foreground_component'])
+                )
+                del comp_config['name']
+                #Start the component up
                 log.info("Starting the main foreground component: %s", foreground_comp_name)
                 fup_ret = component_up(
                     name=foreground_comp_name,
-                    comp_config=config['foreground_component'],
+                    comp_config=comp_config,
                     skip_provision=True,
                     keep_up_on_error=keep_up_on_error,
                     current_containers=containers,
@@ -165,7 +171,6 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
                     background=False,
                     logger=log
                 )
-                config['foreground_component']['name'] = foreground_comp_name 
                 if not fup_ret:
                     errors += 1
                 devlab_bench.actions.down.action()
@@ -186,79 +191,130 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
     comp = name
     comp_cont_name = '{}-devlab'.format(comp)
     containers_dict = {}
+    comp_pid = None
     errors = False
     if logger:
         log = logger
     else:
         log = logging.getLogger('component_up')
-    if not current_containers:
-        log.debug("Getting current list of containers")
-        current_containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
-    for container in current_containers:
-        containers_dict[container['name']] = container
-    container_names = [cntr['name'] for cntr in current_containers]
-    new_container = True
+    comp_type = comp_config.get('type', 'container')
+    if comp_type == 'container':
+        log.debug("Component: '%s' is of type 'container'", comp)
+        if not current_containers:
+            log.debug("Getting current list of containers")
+            current_containers = devlab_bench.helpers.docker.DOCKER.get_containers()[1]
+        for container in current_containers:
+            containers_dict[container['name']] = container
+        container_names = [cntr['name'] for cntr in current_containers]
+        new_container = True
+    elif comp_type == 'host':
+        log.debug("Component: '%s' is of type 'host'", comp)
+        #Look up to see if there is a PID for the 'host' component
+        if os.path.isfile(devlab_bench.UP_ENV_FILE):
+            log.debug("Found devlab_up.env file, loading vars from it for component '%s' to see if this 'host' type component has a PID", name)
+            up_env = get_env_from_file(devlab_bench.UP_ENV_FILE)
+        comp_pid = int(up_env.get('{}_PID'.format(comp.upper()), False))
+        if up_env.get('{}_PID'.format(comp.upper()), None):
+            log.debug("Found component PID: %s", comp_pid)
+    else:
+        log.error("Component: '%s' is of unknown type '%s'", name, comp_type)
+        return False
     while True:
-        if comp_cont_name in container_names:
-            if 'up' in containers_dict[comp_cont_name]['status'].lower():
-                log.info("Component: %s is already running. Skipping...", comp)
-                break
-            else:
-                log.info("Component: %s has already been created, Starting container...", comp)
-                devlab_bench.helpers.docker.DOCKER.start_container(comp_cont_name)
-                new_container = False
-        if new_container:
-            if 'mounts' in comp_config:
-                mount_list = []
-                for mount in comp_config['mounts']:
-                    if mount[0] != '/':
-                        mount_list.append('{}/{}'.format(devlab_bench.PROJ_ROOT, mount))
-                    else:
-                        mount_list.append(mount)
-                comp_config['mounts'] = list(mount_list)
-            if 'run_opts' not in comp_config:
-                comp_config['run_opts'] = list()
-            if 'pre_scripts' in comp_config:
-                for script in comp_config['pre_scripts']:
-                    log.debug("Found Pre script: '%s'", script)
-                    script_ret = script_runner(script, name=comp_cont_name, log=log)
-                    if script_ret[0] != 0:
-                        errors = True
-                        break
-                if errors:
+        if comp_type == 'host':
+            if comp_pid:
+                try:
+                    os.kill(comp_pid, 0)
+                except OSError:
+                    log.debug("Component: %s is not active on pid: %s", comp, comp_pid)
+                else:
+                    log.info("Component: %s is already running. Skipping...", comp)
                     break
-            log.info("Starting component: %s", comp)
-            if not background:
-                comp_config['run_opts'].append('--rm')
-            run_ret = devlab_bench.helpers.docker.DOCKER.run_container(
-                name=comp_cont_name,
-                network=network,
-                background=background,
-                interactive=not background,
-                log_output=False,
-                **comp_config
-            )
-            if run_ret[0] == 0:
-                log.debug("Successfully started component: '%s' as container: '%s'", comp, comp_cont_name)
             else:
-                log.error("FAILED to start component: '%s' as container: '%s'. Aborting...", comp, comp_cont_name)
-                if not keep_up_on_error:
-                    devlab_bench.actions.down.action(components=[comp], rm=True)
-                errors = True
-                break
-            if 'scripts' in comp_config and not skip_provision:
-                for script in comp_config['scripts']:
-                    log.debug("Found provisioning script: '%s'", script)
-                    script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
-                    if script_ret[0] != 0:
-                        if not keep_up_on_error:
-                            devlab_bench.actions.down.action(components=[comp], rm=True)
-                        errors = True
+                log.debug("Component: %s is not active", comp)
+                if 'pre_scripts' in comp_config:
+                    for script in comp_config['pre_scripts']:
+                        log.debug("Found Pre script: '%s'", script)
+                        script_ret = script_runner(script, name=comp_cont_name, log=log)
+                        if script_ret[0] != 0:
+                            errors = True
+                            break
+                    if errors:
                         break
-                if errors:
+            cmd_split = [quote(cmd_arg) for cmd_arg in shlex.split(comp_config['cmd'])]
+            run_cmd = devlab_bench.helpers.command.Command(
+                cmd_split[0],
+                args=cmd_split[1:],
+                use_shell=True,
+                logger=log,
+                interactive=not background,
+                ignore_nonzero_rc=False,
+            )
+            rstat, cpid = run_cmd.run_nowait()
+            if rstat == 0:
+                up_env['{}_PID'.format(comp.upper())] = cpid
+                save_env_file(up_env, devlab_bench.UP_ENV_FILE, force_upper_keys=True)
+                run_cmd.wait()
+        else:
+            if comp_cont_name in container_names:
+                if 'up' in containers_dict[comp_cont_name]['status'].lower():
+                    log.info("Component: %s is already running. Skipping...", comp)
+                    break
+                else:
+                    log.info("Component: %s has already been created, Starting container...", comp)
+                    devlab_bench.helpers.docker.DOCKER.start_container(comp_cont_name)
+                    new_container = False
+            if new_container:
+                if 'mounts' in comp_config:
+                    mount_list = []
+                    for mount in comp_config['mounts']:
+                        if mount[0] != '/':
+                            mount_list.append('{}/{}'.format(devlab_bench.PROJ_ROOT, mount))
+                        else:
+                            mount_list.append(mount)
+                    comp_config['mounts'] = list(mount_list)
+                if 'run_opts' not in comp_config:
+                    comp_config['run_opts'] = list()
+                if 'pre_scripts' in comp_config:
+                    for script in comp_config['pre_scripts']:
+                        log.debug("Found Pre script: '%s'", script)
+                        script_ret = script_runner(script, name=comp_cont_name, log=log)
+                        if script_ret[0] != 0:
+                            errors = True
+                            break
+                    if errors:
+                        break
+                log.info("Starting component: %s", comp)
+                if not background:
+                    comp_config['run_opts'].append('--rm')
+                run_ret = devlab_bench.helpers.docker.DOCKER.run_container(
+                    name=comp_cont_name,
+                    network=network,
+                    background=background,
+                    interactive=not background,
+                    log_output=False,
+                    **comp_config
+                )
+                if run_ret[0] == 0:
+                    log.debug("Successfully started component: '%s' as container: '%s'", comp, comp_cont_name)
+                else:
+                    log.error("FAILED to start component: '%s' as container: '%s'. Aborting...", comp, comp_cont_name)
                     if not keep_up_on_error:
                         devlab_bench.actions.down.action(components=[comp], rm=True)
+                    errors = True
                     break
+        if 'scripts' in comp_config and not skip_provision:
+            for script in comp_config['scripts']:
+                log.debug("Found provisioning script: '%s'", script)
+                script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
+                if script_ret[0] != 0:
+                    if not keep_up_on_error:
+                        devlab_bench.actions.down.action(components=[comp], rm=True)
+                    errors = True
+                    break
+            if errors:
+                if not keep_up_on_error:
+                    devlab_bench.actions.down.action(components=[comp], rm=True)
+                break
         if 'post_up_scripts' in comp_config and background:
             for script in comp_config['post_up_scripts']:
                 log.debug("Found Post up script: '%s'", script)

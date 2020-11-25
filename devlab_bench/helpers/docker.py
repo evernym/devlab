@@ -819,6 +819,10 @@ def get_needed_images(components=None, logger=None):
             comp_config['enabled'] = True
         else:
             comp_config = config['components'][comp]
+        comp_type = comp_config.get('type', 'container')
+        if comp_type == 'host':
+            log.debug("Component: %s type is 'host'. No image needed", comp)
+            continue
         if comp_config['enabled']:
             comp_img = comp_config['image'].split(':')[0]
             #Found direct dependencies for a component's image
@@ -970,6 +974,10 @@ def check_custom_registry(components=None, config=None, logger=None):
             cmpt = config['foreground_component']
         else:
             cmpt = config['components'][comp]
+        comp_type = cmpt.get('type', 'container')
+        if comp_type == 'host':
+            log.debug("Component: %s type is 'host'. No registry or image needed to lookup", comp)
+            continue
         image_host = parse_docker_image_string(cmpt['image'])['host']
         if image_host:
             if not docker_config_loaded:

@@ -9,7 +9,7 @@ import signal
 import subprocess
 import time
 from devlab_bench.exceptions import DevlabCommandError
-from devlab_bench.helpers.common import ISATTY
+from devlab_bench.helpers.common import ISATTY, quote
 
 class Command(object):
     """
@@ -19,6 +19,7 @@ class Command(object):
     Args:
         path: str, or list for the location of the process to run
         args: list
+        env: dict of the environment variable to set for the process
         ignore_nonzero_rc: bool, whether errors should create logs
         interactive: bool, whether the process should be "interactive"
         split: bool
@@ -26,10 +27,11 @@ class Command(object):
         stdin: FileHandle, of stdin to send to the process
         timeout: integer, in minutes before the process is aborted <=0 mean no
             timeout. Default=0
+        use_shell: bool, whether to execute the subprocess using 'shell=True'
         log_output: bool, whether to send the output of the command to the logger
         logger: Logger object to use for messages
     """
-    def __init__(self, path, args=None, ignore_nonzero_rc=False, interactive=False, split=True, suppress_error_out=False, stdin=None, timeout=0, log_output=False, logger=None, **kwargs):
+    def __init__(self, path, args=None, env=None, ignore_nonzero_rc=False, interactive=False, split=True, suppress_error_out=False, stdin=None, timeout=0, use_shell=False, log_output=False, logger=None, **kwargs):
         """
         Initialize the command object
         """
@@ -42,6 +44,7 @@ class Command(object):
         self.interactive = interactive
         self.path = path
         self.real_path = None
+        self.env = env
         if logger:
             self.log = logger
         else:
@@ -53,6 +56,7 @@ class Command(object):
         self.timeout = timeout
         self.stdout = []
         self.stderr = []
+        self.use_shell = use_shell
         self.ctime = time.time()
         self.proc = None
         if log_output and interactive:
@@ -75,11 +79,17 @@ class Command(object):
                     in_path = True
                     break
             if not in_path:
+                if not os.path.isabs(found_path[0]) and self.use_shell:
+                    self.log.debug("Path not found, but use_shell is set, so will defer to that")
+                    return (0, self.path[0])
                 if not self.suppress_error_out:
                     self.log.error("Can't find executable here: %s", self.path)
                     return (-1, "Error! Can't find executable here: {}".format(self.path))
         else:
             if not os.access(self.path, os.X_OK):
+                if not os.path.isabs(found_path) and self.use_shell:
+                    self.log.debug("Path not found, but use_shell is set, so will defer to that")
+                    return (0, found_path)
                 if not self.suppress_error_out:
                     self.log.error("Can't find executable here: %s", self.path)
                 return (-1, "Error! Can't find executable here: {}".format(self.path))
@@ -177,41 +187,6 @@ class Command(object):
             except OSError:
                 pass
             cur_check += 1
-    def _wait_for_proc(self):
-        """
-        Wait for the running process to finish running and process any output
-        that the process has generated while waiting. This is also responsible
-        for watching the process for any timeouts
-        """
-        #Check every .1 seconds if the process is hung or not.
-        #hung means it waited longer than self.timeout
-        self.log.debug("Watching process (pid=%s) for completion or if hung", self.proc.pid)
-        while self.proc.poll() is None:
-            cur_time = time.time()
-            #Write any error messages from the process using our logger
-            self._process_output()
-            #If our process has been running longer than self.timeout
-            #then we should see if it is hung or something
-            if self.timeout > 0:
-                if cur_time - self.ctime > self.timeout * 60:
-                    self.log.warning("Command: '%s'(pid=%s): appears to be hung, attempting to stop and/or kill it", ' '.join([self.real_path] + self.args), self.proc.pid)
-                    self.proc.terminate()
-                    wait_count = 0
-                    while self.proc.poll() is None:
-                        if wait_count >= 20:
-                            self.log.warning("Command: '%s'(pid=%s): Didn't die, forcefully killing it", ' '.join([self.real_path] + self.args), self.proc.pid)
-                            self.proc.kill()
-                            self.proc.wait()
-                            self._process_output(flush=True)
-                            self.proc.communicate()
-                            break
-                        time.sleep(1)
-                        wait_count += 1
-            time.sleep(0.01)
-        #Write any remaining log messages in the pipe
-        self._process_output(flush=True)
-        #This is needed so that the process can clean up its stdout/err pipes
-        self.proc.communicate()
     def die(self, graceful=True):
         """
         Make any running process go away
@@ -234,6 +209,43 @@ class Command(object):
             else:
                 self.proc.kill()
                 self.proc.wait()
+    def run_nowait(self):
+        """
+        Execute the command but don't execute the bits that wait for the process to complete
+
+        Returns:
+            tuple where:
+                First Element is an integer -1 for failure to start, 0 for successfully started
+                Second Element is the pid of the command
+        """
+        precheck_res = self._precheck()
+        if precheck_res[0] < 0:
+            return precheck_res
+        self.real_path = precheck_res[1]
+        subprocess_args = {
+            'shell': self.use_shell
+        }
+        if not self.interactive:
+            subprocess_args['stdout'] = subprocess.PIPE
+            subprocess_args['stderr'] = subprocess.PIPE
+        if self.stdin:
+            subprocess_args['stdin'] = self.stdin
+        if self.env:
+            subprocess_args['env'] = dict(os.environ)
+            subprocess_args['env'].update(self.env)
+        cmd_str = ' '.join([self.real_path] + [quote(script_arg) for script_arg in self.args])
+        self.log.debug("Running command: '%s'", cmd_str)
+        self.ctime = time.time()
+        if self.use_shell:
+            self.proc = subprocess.Popen(cmd_str, **subprocess_args)
+        else:
+            self.proc = subprocess.Popen([self.real_path] + self.args, **subprocess_args)
+        for strm in (self.proc.stdout, self.proc.stderr):
+            if strm is not None:
+                fno = strm.fileno()
+                fl_nb = fcntl.fcntl(fno, fcntl.F_GETFL)
+                fcntl.fcntl(fno, fcntl.F_SETFL, fl_nb | os.O_NONBLOCK)
+        return (0, self.proc.pid)
     def run(self):
         """
         Execute the command
@@ -243,27 +255,10 @@ class Command(object):
                 First Element is the return code of the command
                 Second Element is either a list of strings OR a str (if split==false)
         """
-        precheck_res = self._precheck()
-        if precheck_res[0] < 0:
-            return precheck_res
-        self.real_path = precheck_res[1]
-        subprocess_args = {
-            'shell': False
-        }
-        if not self.interactive:
-            subprocess_args['stdout'] = subprocess.PIPE
-            subprocess_args['stderr'] = subprocess.PIPE
-        if self.stdin:
-            subprocess_args['stdin'] = self.stdin
-        self.log.debug("Running command: '%s'", ' '.join([self.real_path] + self.args))
-        self.ctime = time.time()
-        self.proc = subprocess.Popen([self.real_path] + self.args, **subprocess_args)
-        for strm in (self.proc.stdout, self.proc.stderr):
-            if strm is not None:
-                fno = strm.fileno()
-                fl_nb = fcntl.fcntl(fno, fcntl.F_GETFL)
-                fcntl.fcntl(fno, fcntl.F_SETFL, fl_nb | os.O_NONBLOCK)
-        self._wait_for_proc()
+        run_ret = self.run_nowait()
+        if run_ret[0] != 0:
+            return run_ret
+        self.wait()
         if self.proc.returncode > 0:
             if not self.suppress_error_out:
                 if not self.ignore_nonzero_rc:
@@ -288,3 +283,41 @@ class Command(object):
         if not self.split:
             out = '\n'.join(out)
         return (self.proc.returncode, out)
+    def wait(self):
+        """
+        Wait for the running process to finish running and process any output
+        that the process has generated while waiting. This is also responsible
+        for watching the process for any timeouts
+        """
+        #Check every .1 seconds if the process is hung or not.
+        #hung means it waited longer than self.timeout
+        self.log.debug("Watching process (pid=%s) for completion or if hung", self.proc.pid)
+        try:
+            while self.proc.poll() is None:
+                cur_time = time.time()
+                #Write any error messages from the process using our logger
+                self._process_output()
+                #If our process has been running longer than self.timeout
+                #then we should see if it is hung or something
+                if self.timeout > 0:
+                    if cur_time - self.ctime > self.timeout * 60:
+                        self.log.warning("Command: '%s'(pid=%s): appears to be hung, attempting to stop and/or kill it", ' '.join([self.real_path] + self.args), self.proc.pid)
+                        self.proc.terminate()
+                        wait_count = 0
+                        while self.proc.poll() is None:
+                            if wait_count >= 20:
+                                self.log.warning("Command: '%s'(pid=%s): Didn't die, forcefully killing it", ' '.join([self.real_path] + self.args), self.proc.pid)
+                                self.proc.kill()
+                                self.proc.wait()
+                                self._process_output(flush=True)
+                                self.proc.communicate()
+                                break
+                            time.sleep(1)
+                            wait_count += 1
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            self.proc.send_signal(signal.SIGTERM)
+        #Write any remaining log messages in the pipe
+        self._process_output(flush=True)
+        #This is needed so that the process can clean up its stdout/err pipes
+        self.proc.communicate()
