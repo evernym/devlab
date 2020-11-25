@@ -41,7 +41,8 @@ CONFIG_DEF = {
         'name': None
     },
     'reprovisionable_components': [],
-    'runtime_images': {}
+    'runtime_images': {},
+    'paths': {}
 }
 LOGGING_LEVELS = {
     'debug': logging.DEBUG,
@@ -52,3 +53,4 @@ LOGGING_LEVELS = {
     'notset': logging.NOTSET
 }
 PROJ_ROOT = get_proj_root()
+UP_ENV_FILE = '{}/{}/devlab_up.env'.format(PROJ_ROOT, '.')
