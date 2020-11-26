@@ -52,7 +52,7 @@ def action(components='*', rm=False, **kwargs):
         components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
     components_to_stop.reverse()
     for comp in components_to_stop:
-        comp_cont_name = '{}-devlab'.format(comp)
+        comp_cont_name = '{}-devlab'.format(comp) #pylint: disable=duplicate-code
         if comp == foreground_comp_name:
             comp_type = config['foreground_component'].get('type', 'container')
         else:

@@ -18,6 +18,7 @@ syntax:
     - python -m py_compile devlab
     - python -m py_compile installer.py
     - pylint devlab
+    - pylint -E devlab_bench
     - pylint installer.py
 
 make_pkg:
