@@ -31,7 +31,7 @@ class Command(object):
         log_output: bool, whether to send the output of the command to the logger
         logger: Logger object to use for messages
     """
-    def __init__(self, path, args=None, env=None, ignore_nonzero_rc=False, interactive=False, split=True, suppress_error_out=False, stdin=None, timeout=0, use_shell=False, log_output=False, logger=None, **kwargs):
+    def __init__(self, path, args=None, env=None, ignore_nonzero_rc=False, interactive=False, split=True, suppress_error_out=False, stdin=None, timeout=0, use_shell=False, log_output=False, logger=None, **kwargs): #pylint: disable=too-many-arguments
         """
         Initialize the command object
         """

@@ -13,7 +13,7 @@ import socket
 import sys
 from copy import deepcopy
 
-import devlab_bench
+import devlab_bench #pylint: disable=cyclic-import
 from devlab_bench.exceptions import DevlabComponentError
 
 #Python2/3 compatibility
