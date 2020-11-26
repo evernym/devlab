@@ -1,6 +1,6 @@
 #!/bin/sh
 bridge_ip=$(ip addr | grep 'inet ' | grep -v 'host lo' | awk '{print $2}' | cut -d '/' -f 1 | head -n 1)
-source /devlab/persistent_data/vault/env
+source /devlab/persistent_data/vault-example/env
 
 function gen_status {
     local rc

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source /devlab/persistent_data/vault/env
+source /devlab/persistent_data/vault-example/env
 
 echo "Type 'exit' to exit"
 while read -p 'Press "Enter" to display my_app secret: ' line; do

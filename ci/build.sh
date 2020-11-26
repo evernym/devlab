@@ -1,6 +1,9 @@
 #!/bin/bash
 dev_release=true
-proj_root=$(pwd)
+proj_root=$(realpath "$0")
+proj_root=$(dirname "$proj_root")
+proj_root=$(dirname "$proj_root")
+cd "$proj_root"
 last_change=$(git rev-parse HEAD)
 tags=$(git tag -l 'v[0-9]*' | sort -rV)
 last_release_tag=$(echo "$tags" | head -n 1)
@@ -56,6 +59,14 @@ if [ -d 'build/' ]; then
 fi
 mkdir -p build/devlab
 
+#Copy in the module
+cp -r devlab_bench/ build/devlab/
+#Cleanup any byte code
+find build/devlab/devlab_bench -type f -name '*.pyc' -exec rm '{}' \;
+pcache_dirs=$(find build/devlab/devlab_bench -type d -name '__pycache__')
+for pcache in $pcache_dirs ; do
+    rm -rf "$pcache"
+done
 #Copy in the executable
 cp devlab build/devlab/
 cp installer.py build/devlab/

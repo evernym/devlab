@@ -144,7 +144,9 @@ All Keys that are in **bold** are required
 | **image** | String | A docker notation of docker image to use for the component. This can also reference a devlab base image, as well as a project's [runtime image](#runtime-image-structure) | 
 | systemd_support | Boolean | If set to `true` then this will start the component with proper `/run`, `/run/lock`, `/tmp`, and `/sys/fs/cgroup` mounts so systemd can run |
 | **enabled** | Boolean | Whether or not the component should be brought [up](#up-action) and images [built](#build-action) |
-| cmd | String | This is the command passed to the container as part of the `docker run` command |
+| **_name_** | String | This is only supported for `foreground_components` but required. It indicates the name of the component |
+| type | String | This only only supported for `foreground_components`, but can be either `host` or `container`. If set to host then `cmd` is executed on the local system instead of a container |
+| cmd | String | This is the command passed to the container as part of the `docker run` command. If `type` is set to `host` then the command is executed on the local system |
 | ports | List of Strings | The ports that should be "published" using the same notation as the `--publish` option to `docker run` |
 | mounts | List of Strings | List of mounts in the format `SOURCE_ON_HOST:DESTINATION_IN_CONTAINER`. If using a relative path then the paths are relative to the project's root |
 | run_opts | List of Strings | Additional options to pass to `docker run`. Each CLI arg must be it's own element. For example: `[ '--ip', '172.30.255.2' ]` would become `docker run --ip 172.30.255.2 IMAGE COMMAND` etc... |
@@ -218,6 +220,9 @@ All Keys that are in **bold** are required
 | build_opts | List of Strings | Additional options to pass to the `docker build` command. Each CLI arg must be it's own element. For example: `[ '--build-arg', 'foo=bar' ]` would become `docker build --build-arg foo=bar PATH...` etc... |
 | ordinal | Hash | This is used indicate the order of the images to build. When parallel execution is supported, the `group` key indicates the image that can be built at the same time, `number` indicates the order inside the group to start up |
 
+_**[NOTE]**_ Devlab supports a special label (`last_modified`).
+If this label is present in the `docker_file`, then everytime that the devlab project is brought `up`, it will check that the value of the label in the docker image matches the value of `last_modified` in the `docker_file`. If they are different then devlab will rebuild the image. This allows you to ensure that updates to the `docker_file`'s in your runtime images, result in the users of your project getting updated images.
+
 ## Script Runner Syntax
 The general format of a Script Runner formatted string is:
 ```
@@ -228,7 +233,7 @@ All Keys that are in **bold** are required
 
 | Key | Value Description |
 | --- | ---               |
-| MODE | This can be unset or have a value of: `helper_container`, or `running_container`. If unset inside of a component `script` like declaration, then the command will run within the component's container |
+| MODE | This can be unset or have a value of: `helper_container`, `running_container`, or `host`. If unset inside of a component `script` like declaration, then the command will run within the component's container. If using `host` the command will be run from your local system |
 | OPTS | When in `running_container` mode, OPTS will use the [running_container format](#script-runner-running_container-mode)<br >When in `helper_container` mode OPTS will use the [helper_container format](#script-runner-helper_container-mode)|
 | ENV_VAR | Using the VARIABLE=VALUE syntax, adding one or more of these in from of the CMD, will pass them as environment variables to CMD |
 | **CMD** | Path to a command to run with any args |

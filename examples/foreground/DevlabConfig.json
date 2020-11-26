@@ -6,7 +6,7 @@
     "project_filter": "lab.dev.example.type=devlab",
     "wizard_enabled": false,
     "components": {
-        "vault": {
+        "vault-example": {
             "image": "vault:latest",
             "enabled": true,
             "cmd": "vault server -config /vault/config",
@@ -18,7 +18,7 @@
             ],
             "mounts": [
                 ":/devlab",
-                "persistent_data/vault/data:/vault/file"
+                "persistent_data/vault-example/data:/vault/file"
             ],
             "post_up_scripts": [
                 "VAULT_ADDR=http://127.0.0.1:8200 /devlab/scripts/setup_vault.sh"
