@@ -97,7 +97,9 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
         os.mkdir('{}/{}'.format(devlab_bench.PROJ_ROOT, config['paths']['component_persistence']))
     if os.path.isfile(devlab_bench.UP_ENV_FILE):
         prev_env = get_env_from_file(devlab_bench.UP_ENV_FILE)
-        if prev_env['BIND_TO_HOST'] != up_env['BIND_TO_HOST']:
+        cur_bind = up_env['BIND_TO_HOST']
+        up_env.update(prev_env)
+        if prev_env['BIND_TO_HOST'] != cur_bind:
             log.warning("Previous devlab environment was stood up with --bind-to-host set to: %s. Starting with the --bind-to-host set to: %s anyway", prev_env['BIND_TO_HOST'], prev_env['BIND_TO_HOST'])
             up_env['BIND_TO_HOST'] = prev_env['BIND_TO_HOST']
     else:
@@ -211,13 +213,13 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
         log.debug("Component: '%s' is of type 'host'", comp)
         #Look up to see if there is a PID for the 'host' component
         if os.path.isfile(devlab_bench.UP_ENV_FILE):
-            log.debug("Found devlab_up.env file, loading vars from it for component '%s' to see if this 'host' type component has a PID", name)
+            log.debug("Found devlab_up.env file, loading vars from it for component '%s' to see if this 'host' type component has a PID", comp)
             up_env = get_env_from_file(devlab_bench.UP_ENV_FILE)
         comp_pid = int(up_env.get('{}_PID'.format(comp.upper()), False))
         if up_env.get('{}_PID'.format(comp.upper()), None):
             log.debug("Found component PID: %s", comp_pid)
     else:
-        log.error("Component: '%s' is of unknown type '%s'", name, comp_type)
+        log.error("Component: '%s' is of unknown type '%s'", comp, comp_type)
         return False
     while True:
         if comp_type == 'host':

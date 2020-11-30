@@ -59,11 +59,14 @@ def action(**kwargs):
     for comp in components:
         if comp == foreground_comp_name:
             comp_type = config['foreground_component'].get('type', 'container')
+            comp_config = config['foreground_component']
         else:
             comp_type = config['components'][comp].get('type', 'container')
+            comp_config = config['components'][comp]
         if comp_type == 'host':
             if up_env.get('{}_PID'.format(comp.upper()), None):
                 comp_pid = up_env.get('{}_PID'.format(comp.upper()), None)
+                comp_config['pid'] = comp_pid
                 if comp_pid:
                     log.debug('Found pid in devlab up environemnt file for comp: %s, pid: %s', comp, comp_pid)
                     try:
@@ -140,17 +143,19 @@ def action(**kwargs):
         status_ports = []
         if comp == foreground_comp_name:
             comp_type = config['foreground_component'].get('type', 'container')
+            comp_config = config['foreground_component']
         else:
             comp_type = config['components'][comp].get('type', 'container')
+            comp_config = config['components'][comp]
         if comp in existing_components:
             status_row['container_name'] = '{}-devlab'.format(comp)
             format_fillers['container_name'] = status_row['container_name']
         if comp in running_components:
             if comp_type == 'host':
-                status_row['container_name'] = 'N/A (cmd on host)'
+                status_row['container_name'] = 'N/A (pid={})'.format(comp_config.get('pid', '???'))
             try:
                 first_port = True
-                for port in config['components'][comp]['ports']:
+                for port in comp_config['ports']:
                     local_port = parse_docker_local_ports(port)
                     if first_port:
                         status_row['local_port'] = local_port
@@ -169,26 +174,23 @@ def action(**kwargs):
             status_row['status'] = 'up'
             status_script = ''
             try:
-                status_script = config['components'][comp]['status_script']
+                status_script = comp_config['status_script']
                 if status_script:
                     log.debug("Found status script: '%s'", status_script)
             except KeyError:
-                try:
-                    status_script = config['foreground_component']['status_script']
-                except KeyError:
-                    log.debug("Skipping status script for component: '%s' as none is defined", comp)
-                    if format_fillers['local_port']:
-                        status_row['health'] = 'healthy'
-                        for port in config['components'][comp]['ports']:
-                            if 'udp' in port:
-                                continue
-                            port = parse_docker_local_ports(port)
-                            log.debug("Performing basic port check on '%s', port '%s', for health check", comp, port)
-                            if not port_check('127.0.0.1', format_fillers['local_port'].split('-')[0].split('(')[0]):
-                                log.warning("Basic port status check failed for '%s', port '%s'", comp, port)
-                                status_row['health'] = 'degraded'
-                            else:
-                                log.debug("Basic port status check successful for '%s', port '%s'", comp, port)
+                log.debug("Skipping status script for component: '%s' as none is defined", comp)
+                if format_fillers['local_port']:
+                    status_row['health'] = 'healthy'
+                    for port in comp_config['ports']:
+                        if 'udp' in port:
+                            continue
+                        port = parse_docker_local_ports(port)
+                        log.debug("Performing basic port check on '%s', port '%s', for health check", comp, port)
+                        if not port_check('127.0.0.1', format_fillers['local_port'].split('-')[0].split('(')[0]):
+                            log.warning("Basic port status check failed for '%s', port '%s'", comp, port)
+                            status_row['health'] = 'degraded'
+                        else:
+                            log.debug("Basic port status check successful for '%s', port '%s'", comp, port)
             if status_script:
                 script_ret = script_runner(status_script, name=status_row['container_name'], interactive=False, log_output=False)
                 if script_ret[0] != 0:
