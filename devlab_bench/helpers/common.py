@@ -523,7 +523,10 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
         name = script_parse['name']
     script = script_parse['script']
     script_mode = script_parse['mode']
-    script_split = [quote(script_arg) for script_arg in shlex.split(script)]
+    if script_mode == 'host':
+        script_split = shlex.split(script)
+    else:
+        script_split = [quote(script_arg) for script_arg in shlex.split(script)]
     script_stripped = []
     script_run_opts = []
     env_map = {}
@@ -583,7 +586,7 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
             env=env_map,
             use_shell=True,
             logger=log,
-            log_output=True,
+            log_output=log_output,
             ignore_nonzero_rc=ignore_nonzero_rc,
         ).run()
     else:
