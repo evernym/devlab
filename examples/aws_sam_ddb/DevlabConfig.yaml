@@ -1,0 +1,34 @@
+paths:
+  component_persistence: persistent_data
+network:
+  name: aws_sam_devlab_example.lab
+  device_name: awssam.devlab
+  cidr: 172.30.255.48/28
+domain: dev.lab
+project_filter: lab.dev.aws.sam.example.type=devlab
+wizard_enabled: false
+components:
+  dynamodb:
+    image: 'amazon/dynamodb-local:latest'
+    enabled: true
+    cmd: '-jar DynamoDBLocal.jar -dbPath /var/lib/dynamodb -sharedDb'
+    ports:
+      - '8000:8000'
+    mounts:
+      - ':/devlab'
+      - 'persistent_data/dynamodb/data:/var/lib/dynamodb'
+    pre_scripts:
+      - 'helper_container|devlab_helper:/devlab/scripts/prep_local_dynamodb.sh'
+    scripts:
+      - 'helper_container|devlab_helper:/devlab/scripts/setup_local_dynamodb.sh --create-tables --endpoint dynamodb-devlab'
+    status_script: /devlab/cicd/setup_local_dynamodb.sh --status
+    ordinal:
+      group: 0
+      number: 1
+    reset_paths:
+      - data/
+foreground_component:
+  name: sample-app
+  type: host
+  cmd: sam local start-api --docker-network aws_sam_devlab_example.lab
+
