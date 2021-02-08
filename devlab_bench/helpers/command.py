@@ -230,6 +230,9 @@ class Command(object):
             subprocess_args['stderr'] = subprocess.PIPE
         if self.stdin:
             subprocess_args['stdin'] = self.stdin
+        #Default subprocess behavior is to use the current env vars so if a
+        #custom env var is requested, we should grab the current env and then
+        #update the env with the new ones passed in
         if self.env:
             subprocess_args['env'] = dict(os.environ)
             subprocess_args['env'].update(self.env)
