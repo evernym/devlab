@@ -112,6 +112,10 @@ class DockerHelper(object):
         ]
         if os.path.isfile(docker_file):
             with open(docker_file) as stdin:
+                if 'env' in kwargs:
+                    kwargs['env'].update({'DOCKER_BUILDKIT': "0"})
+                else:
+                    kwargs['env'] = {'DOCKER_BUILDKIT': "0"}
                 cmd_ret = Command(
                     self.docker_bin_paths,
                     opts,
