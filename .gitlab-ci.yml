@@ -10,6 +10,7 @@ stages:
   - docker-images
   - test
   - build
+  - upload
   - deploy
 
 .kaniko-build:
@@ -17,7 +18,6 @@ stages:
   only:
     refs:
       - branches
-      - tags
       - merge_requests
   tags:
     - docker-machine
@@ -68,12 +68,12 @@ stages:
 
 dockerimage_devlab_debpackage:
   extends: .kaniko-build
-  only:
-    changes:
-      - ci/builder.Dockerfile
   variables:
     DOCKERFILE_PATH: 'ci/builder.Dockerfile'
     DOCKER_IMAGE_NAME: 'devlab-build'
+  only:
+    changes:
+    - ci/builder.Dockerfile
 
 syntax:
   stage: test
@@ -90,12 +90,40 @@ make_pkg:
   extends: .tags
   script:
     - ci/build.sh
+  needs:
+    - syntax
   artifacts:
     paths:
       - artifacts/*
     expire_in: 1 week
 
-create_new_release:
+upload_release_asset:
+  stage: upload
+  extends: .tags
+  variables:
+    PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/devlab"
+    VERSION: $CI_COMMIT_TAG
+  needs:
+    - make_pkg
+  script:
+    - |
+      if [ "${CI_COMMIT_TAG:0:1}" == "v" ] ; then
+        export VERSION=${CI_COMMIT_TAG:1}
+      fi
+    - |
+      for asset in $(find artifacts/ -type f) ; do
+        fname=$(basename $asset)
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file $asset ${PACKAGE_REGISTRY_URL}/${VERSION}/${fname}
+        echo "$fname|${PACKAGE_REGISTRY_URL}/${VERSION}/${fname}" >> ./artifacts/assets.out
+      done
+  artifacts:
+    paths:
+      - artifacts/assets.out
+  only:
+    - tags@te/devlab
+    - tags@evernym/utilities/devlab
+
+create_github_release:
   stage: deploy
   extends: .tags
   environment:
@@ -106,8 +134,26 @@ create_new_release:
     GITHUB_REPO: devlab
   script:
     - ci/create_github_release.sh
-  dependencies:
+  needs:
     - make_pkg
   only:
     - tags@te/devlab
+    - tags@evernym/utilities/devlab
+  when: on_success
+
+create_gitlab_release:
+  stage: deploy
+  extends: .tags
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  variables:
+    PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/devlab"
+    VERSION: $CI_COMMIT_TAG
+  script:
+    - ci/create_gitlab_release.sh
+  needs:
+    - upload_release_asset
+    - make_pkg
+  only:
+    - tags@te/devlab
+    - tags@evernym/utilities/devlab
   when: on_success

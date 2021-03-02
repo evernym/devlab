@@ -1,15 +1,15 @@
-FROM ubuntu:trusty
+FROM ubuntu:focal
   
 # ARGS and ENVS
 ENV DEBIAN_FRONTEND=noninteractive
 
-ARG PACKAGES="apt-transport-https curl git jq python3 python3-pip python3-setuptools unzip"
-ARG PIPS="yamllint pylint==1.8.3"
+ARG PACKAGES="apt-transport-https curl file git gnupg jq python3 python3-pip python python-pip-whl unzip"
+ARG PIPS="yamllint pylint"
 ARG APT="/usr/bin/apt-get -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef"
 
 # Install packages
-RUN $APT update && $APT install -y $PACKAGES && \
-    pip3 --disable-pip-version-check install --no-install-recommends $PIPS && \
+RUN $APT update && $APT install -y --no-install-recommends $PACKAGES && \
+    pip3 --disable-pip-version-check install $PIPS && \
     rm -rf /var/lib/apt/lists/*
 
 # Provide Evernym CA
