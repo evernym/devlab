@@ -113,7 +113,7 @@ upload_release_asset:
     - |
       for asset in $(find artifacts/ -type f) ; do
         fname=$(basename $asset)
-        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file $asset ${PACKAGE_REGISTRY_URL}/${VERSION}/${fname}
+        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file $asset ${PACKAGE_REGISTRY_URL}/${VERSION}/${fname} || exit 1
         echo "$fname|${PACKAGE_REGISTRY_URL}/${VERSION}/${fname}" >> ./artifacts/assets.out
       done
   artifacts:

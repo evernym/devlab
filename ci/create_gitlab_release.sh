@@ -10,7 +10,7 @@ for asset in $(cat ./artifacts/assets.out) ; do
     fname=$(echo "$asset" | cut -d '|' -f 1)
     url=$(echo "$asset" | cut -d '|' -f 2)
     echo "Found asset: $fname at url: $url"
-    ASSET_ARGS="$ASSET_ARGS --assets-link '{\"name\":\"${fname}\",\"url\":\"${url}\"}'"
+    ASSET_ARGS="$ASSET_ARGS --assets-link {\"name\":\"${fname}\",\"url\":\"${url}\"}"
 done
 
 echo "Creating gitlab release with the following asset arguments:"
