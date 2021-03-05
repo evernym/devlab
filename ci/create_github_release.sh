@@ -40,15 +40,12 @@ if [ "${VERSION:0:1}" == "v" ] ; then
 fi
 
 if [ -z "$RELEASE_BODY" ] ; then
-    if [ -f "artifacts/new_changes.log" ] ; then
-        echo "Loading most recent changes from: artifacts/new_changes.log"
-        RELEASE_BODY=$(cat artifacts/new_changes.log)
-    fi
+    echo "Loading most recent changes from: artifacts/new_changes.md"
+    RELEASE_BODY=$(cat artifacts/new_changes.md)
 fi
 
 if [ ! -z "$RELEASE_BODY" ] ; then
-    RELEASE_BODY=$(echo "$RELEASE_BODY" | sed 's/^/ * / ; s/"/\\"/g')
-    RELEASE_BODY=$(echo -e "# Changes\n$RELEASE_BODY" | sed 's/$/\\n/g' | tr -d '\n')
+    RELEASE_BODY=$(echo "$RELEASE_BODY" | sed 's/"/\\"/g ; s/$/\\n/g' | tr -d '\n')
 fi
 
 RELEASE_JSON=$(cat <<EOF
