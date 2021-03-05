@@ -92,3 +92,6 @@ fi
 #Package it all up
 tar cvz -C build/ devlab > artifacts/devlab_${release_ver}_all.tgz
 echo "$changes_since_release" > artifacts/new_changes.log
+
+echo "Generating a summary of the build's recent changes in markdown from: artifacts/new_changes.log"
+echo -e "# Changes\n$(cat artifacts/new_changes.log | sed 's/^/ * /')" > artifacts/new_changes.md

@@ -44,14 +44,14 @@ PARSER = None
 DEVLAB_MODULE_NAME = 'devlab_bench'
 
 ## Classes
-class FileIndexParser(HTMLParser, object): #pylint: disable=abstract-method
+class FileIndexParser(HTMLParser): #pylint: disable=abstract-method
     """
     Subclass of HTMLParser, for finding tags with an href and adding them to an
     internal 'parsed' list attribute.
     """
     def __init__(self, *args, **kwargs):
         """Initialize and reset this instance."""
-        super(FileIndexParser, self).__init__(*args, **kwargs)
+        super(FileIndexParser, self).__init__(*args, **kwargs) #pylint: disable=super-with-arguments
         self.parsed = list()
         self.reset()
     def handle_starttag(self, tag, attrs):
@@ -356,7 +356,7 @@ def http_request(url, headers=None, payload=None, insecure=False, decode=True, l
         data = rsp.read()
     if decode:
         data = data.decode()
-    if code >= 200 and code <= 299:
+    if 200 <= code <= 299:
         return (True, data)
     return (False, data)
 
@@ -410,9 +410,8 @@ def list_packages(path, logger):
                     releases_page += 1
                     log.debug("Checking for more releases on page: %s", releases_page)
                     continue
-                else:
-                    log.error("Response body: '%s'", http_rsp[1])
-                    log.error("Failed getting releases from: '%s'", path)
+                log.error("Response body: '%s'", http_rsp[1])
+                log.error("Failed getting releases from: '%s'", path)
                 break
         else:
             log.debug('Assuming repo path is an html index of files')

@@ -5,10 +5,10 @@ class DevlabCommandError(Exception):
     """
     Exception class for Devlab Command class errors
     """
-    pass
+    pass #pylint: disable=unnecessary-pass
 
 class DevlabComponentError(Exception):
     """
     Exception class for dealing with components
     """
-    pass
+    pass #pylint: disable=unnecessary-pass
