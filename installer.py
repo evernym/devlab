@@ -417,9 +417,9 @@ def list_packages(path, logger):
             log.debug('Repo path is a gitlab releases url. Looking for devlab packages in releases')
             path_split = path.split('/')
             # Take off the protocol, double /, and the hostname from the front
-            gitlab_proto = path_split.pop(0)
-            path_split.pop(0)
-            gitlab_server = path_split.pop(0)
+            path_split.pop(0) #Protocol
+            path_split.pop(0) #double //
+            gitlab_server = path_split.pop(0) #hostname
             # Take off the last two URI paths (/-/releases)
             path_split.pop()
             if path_split[-1] == '-':
@@ -500,7 +500,7 @@ def list_packages(path, logger):
                 log.warning("Could not parse metadata from file: '%s' at '%s'. Skipping...", file_found, link)
                 continue
             if 'http' in link.lower():
-                metadata['path'] = link 
+                metadata['path'] = link
             else:
                 metadata['path'] = '{}/{}'.format(path, file_found)
             packages[metadata['version']] = metadata
