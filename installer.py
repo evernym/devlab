@@ -413,6 +413,59 @@ def list_packages(path, logger):
                 log.error("Response body: '%s'", http_rsp[1])
                 log.error("Failed getting releases from: '%s'", path)
                 break
+        elif 'gitlab.com/' in path and path.endswith('releases'):
+            log.debug('Repo path is a gitlab releases url. Looking for devlab packages in releases')
+            path_split = path.split('/')
+            # Take off the protocol, double /, and the hostname from the front
+            gitlab_proto = path_split.pop(0)
+            path_split.pop(0)
+            gitlab_server = path_split.pop(0)
+            # Take off the last two URI paths (/-/releases)
+            path_split.pop()
+            if path_split[-1] == '-':
+                path_split.pop()
+            gitlab_repo = path_split.pop()
+            gitlab_namespace = '/'.join(path_split)
+            log.debug('Looking up project id for: "%s" in namespace: "%s" on: %s', gitlab_repo, gitlab_namespace, gitlab_server)
+            gitlab_project_api_path = 'https://gitlab.com/api/v4/projects'
+            gitlab_project_lookup_api_path = '{}/{}%2F{}'.format(
+                gitlab_project_api_path,
+                gitlab_namespace.replace('/', '%2F'),
+                gitlab_repo
+            )
+            http_rsp = http_request(gitlab_project_lookup_api_path)
+            if http_rsp[0]:
+                try:
+                    project_details = json.loads(http_rsp[1])
+                    gitlab_project_id = project_details['id']
+                    log.debug('Found gitlab project id: %s', gitlab_project_id)
+                except:
+                    log.error("Response body: '%s'", http_rsp[1])
+                    log.error("Failed getting project id from: '%s'", gitlab_project_lookup_api_path)
+                    raise
+            gitlab_releases_api_path = '{}/{}/releases'.format(gitlab_project_api_path, gitlab_project_id)
+            log.debug("Looking up releases from: %s", gitlab_releases_api_path)
+            http_rsp = http_request(gitlab_releases_api_path)
+            if http_rsp[0]:
+                try:
+                    json_rsp = json.loads(http_rsp[1])
+                except:
+                    log.error("Response body: '%s'", http_rsp[1])
+                    log.error("Failed getting project releases from: '%s'", gitlab_releases_api_path)
+                    raise
+                for release in json_rsp:
+                    try:
+                        assets = release['assets']
+                        asset_links = assets['links']
+                    except KeyError:
+                        asset_links = []
+                    for asset_link in asset_links:
+                        found_files.append(
+                            {
+                                'name': asset_link['name'],
+                                'file_found': asset_link['direct_asset_url']
+                            }
+                        )
         else:
             log.debug('Assuming repo path is an html index of files')
             http_rsp = http_request(path)
@@ -429,20 +482,25 @@ def list_packages(path, logger):
             sys.exit(1)
         else:
             found_files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-    for file_found in found_files:
-        name, ext = os.path.splitext(
-            os.path.basename(file_found)
-        )
+    for file_entry in found_files:
+        if isinstance(file_entry, dict):
+            file_found = file_entry['name']
+            name, ext = os.path.splitext(file_found)
+            link = file_entry['file_found']
+        else:
+            file_found = file_entry
+            name, ext = os.path.splitext(os.path.basename(file_found))
+            link = file_entry
         if name.startswith('devlab_') and ext.lower() in ('.tar.gz', '.tgz'):
-            log.debug("Parsing metadata from found devlab package: '%s'", file_found)
+            log.debug("Parsing metadata from found devlab package: '%s' at '%s'", file_found, link)
             metadata = parse_pkg_name(
                 os.path.basename(file_found)
             )
             if not metadata:
-                log.warning("Could not parse metadata from file: '%s'. Skipping...", file_found)
+                log.warning("Could not parse metadata from file: '%s' at '%s'. Skipping...", file_found, link)
                 continue
-            if 'http' in file_found.lower():
-                metadata['path'] = file_found
+            if 'http' in link.lower():
+                metadata['path'] = link 
             else:
                 metadata['path'] = '{}/{}'.format(path, file_found)
             packages[metadata['version']] = metadata
