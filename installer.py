@@ -31,7 +31,8 @@ except ImportError:
 
 ## Variables
 ARGS = None
-DEF_HTTP_URL = 'https://github.com/evernym/devlab/releases'
+#DEF_HTTP_URL = 'https://github.com/evernym/devlab/releases'
+DEF_HTTP_URL = 'https://gitlab.com/evernym/utilities/devlab/-/releases'
 LOGGING_LEVELS = {
     'debug': logging.DEBUG,
     'info': logging.INFO,
