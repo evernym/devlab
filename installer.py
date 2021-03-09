@@ -111,7 +111,8 @@ def action_install(repo_path, set_version=None, **kwargs):
         log.info("Loading done. size=%s", len(data))
     else:
         log.info("Downloading version: %s...", set_version)
-        status, data = http_request(packages[set_version]['path'], decode=False, logger=log)
+        # Impersonate curl so the gitlab doesn't throw a 403 forbidden....
+        status, data = http_request(packages[set_version]['path'], headers={'User-Agent': 'curl/7.66.0'}, decode=False, logger=log)
         log.info("Downloading done. Status=%s size=%s", status, len(data))
     if status:
         homedir = os.path.expanduser('~')
