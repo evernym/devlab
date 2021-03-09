@@ -19,6 +19,10 @@ There are three options for installing devlab:
 1. Clone this repository and link it directly to someplace in your path
    * NOTE - This will disable the 'update' feature in devlab and the installer. Meaning you will be using `git` to manage your own updates, which is useful if you are doing development work on `devlab`
 
+# Contributing
+
+If you would like contribute to this project, please fork from our gitlab [here](https://gitlab.com/evernym/utilities/devlab), and submit a MR.
+
 # Devlab's terms
 
 1. **Project**: A directory with at least a [DevlabConfig.json or DevlabConfig.yaml](#devlab-configuration) that tells devlab how to stand things up
