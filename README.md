@@ -21,7 +21,12 @@ There are three options for installing devlab:
 
 # Contributing
 
-If you would like contribute to this project, please fork from our gitlab [here](https://gitlab.com/evernym/utilities/devlab), and submit a MR.
+If you would like contribute to this project, please do the following:
+
+1. Fork from our gitlab [here](https://gitlab.com/evernym/utilities/devlab)
+1. Force a pipeline run (So that you have the needed docker image in your fork's docker registry). This can be done by going to CI/CD -> Pipelines -> Then the button "Run Pipeline"
+1. Make changes to your fork. (Best practice is usually to create a branch in your fork, for your changes)
+1. Submit an MR to our repo. This can be done by going to Merge Requests -> Click on "New merge request" -> select your fork's branch as the source -> select our target branch (usually master, unless told otherwise)
 
 # Devlab's terms
 
