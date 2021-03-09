@@ -3,8 +3,7 @@ image: $CI_REGISTRY_IMAGE/devlab-build:latest
 
 .tags:
   tags:
-    - docker-machine
-    - micro
+    - docker
 
 stages:
   - docker-images
@@ -20,8 +19,7 @@ stages:
       - branches
       - merge_requests
   tags:
-    - docker-machine
-    - large
+    - docker
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]

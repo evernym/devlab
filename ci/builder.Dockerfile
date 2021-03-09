@@ -45,7 +45,3 @@ lFnjUUk49av67um43JHcinT5NFPuleZzkjaL/D8ueOrjXQDy05rwVdgmw9pXog4B\n\
 Tw6APXtEnjfD2H8HOpOX/7ef4gWK0O1Q7A==\n\
 -----END CERTIFICATE-----\n' > /usr/local/share/ca-certificates/Evernym_Root_CA.crt && \
 /usr/sbin/update-ca-certificates
-
-#Add Evernym Internal Repo
-RUN curl -s https://repo.corp.evernym.com/repo.corp.evenym.com-sig.key | apt-key add - 2>&1 && \
-    echo 'deb https://repo.corp.evernym.com/deb evernym-ubuntu main' > /etc/apt/sources.list.d/repo.corp.evernym.com.list
