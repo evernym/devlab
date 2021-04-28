@@ -304,7 +304,7 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
                         devlab_bench.actions.down.action(components=[comp], rm=True)
                     errors = True
                     break
-        if 'scripts' in comp_config and not skip_provision:
+        if new_container and not skip_provision and 'scripts' in comp_config:
             for script in comp_config['scripts']:
                 log.debug("Found provisioning script: '%s'", script)
                 script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)

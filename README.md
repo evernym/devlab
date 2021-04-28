@@ -269,6 +269,11 @@ Execute a `foo.sh` script inside of the component's main container
 /devlab/scripts/foo.sh
 ```
 
+Execute a command on your local system
+```
+host: /sbin/sysctl -w vm.max_map_count=262144
+```
+
 ### Script Runner running_container Mode
 This mode is for running a command inside of an already running container
 
