@@ -184,6 +184,24 @@ def action(targets='*', reset_wizard=False, full=False, **kwargs):
                     shutil.rmtree(full_path)
         except KeyError:
             pass
+        if full:
+            log.info("Resetting 'full' reset files for component '%s'", comp)
+            try:
+                for fpath in comp_config['reset_full']:
+                    full_path = '{PROJ_ROOT}/{comp_pers}/{component}/{path}'.format(
+                        PROJ_ROOT=devlab_bench.PROJ_ROOT,
+                        comp_pers=config['paths']['component_persistence'],
+                        component=comp,
+                        path=fpath
+                    ).replace('..', '')
+                    if os.path.isdir(full_path):
+                        log.debug("Removing directory: '%s'", full_path)
+                        shutil.rmtree(full_path)
+                    if os.path.isfile(full_path):
+                        log.debug("Removing file: '%s'", full_path)
+                        os.remove(full_path)
+            except KeyError:
+                pass
     if 'devlab' in components_to_reset:
         log.info("Resetting devlab specific files")
         try:

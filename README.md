@@ -142,7 +142,8 @@ The structure looks like this:
         "group": INT,
         "number": INT 
     },
-    "reset_paths": []
+    "reset_paths": [],
+    "reset_full": []
 }
 ```
 
@@ -166,6 +167,7 @@ All Keys that are in **bold** are required
 | shell | String | The path to the shell inside the container that will be the default command when using the devlab [sh](#sh-action) action |
 | ordinal | Hash | This is used indicate the order of the components. When parallel execution is supported, the `group` key indicates the components that can be brought up at the same time, `number` indicates the order inside the group to start up |
 | reset_paths | List of Strings | These are paths to files and diretories relative to the `paths['component_persistence']` that should be deleted when performing a devlab [reset](#reset-action) |
+| reset_full | List of Strings | Paths to files and directories relative to the `paths['component_persistence']`, that should be removed as part of a devlab [reset](#reset-action) `--full` action |
 
 ## Network Config Structure
 The structure looks like this:
