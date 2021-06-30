@@ -153,7 +153,7 @@ def action(components='*', rm=False, **kwargs):
                     if not script_parse['mode'] == 'host':
                         log.warning("Post-Down scripts cannot run inside of the now down container: '%s' defaulting to running on your host. Consider changing your post down script to have a 'host:' prefix to avoid this warning", comp)
                         script = 'host:{}'.format(script)
-                script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
+                script_ret = script_runner(script, name=comp_cont_name, interactive=True)
                 if script_ret[0] != 0:
                     errors = True
                     break
