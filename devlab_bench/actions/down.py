@@ -6,7 +6,7 @@ import os
 import time
 
 import devlab_bench.helpers.docker
-from devlab_bench.helpers.common import get_config, get_env_from_file, get_components, get_ordinal_sorting, save_env_file, unnest_list
+from devlab_bench.helpers.common import get_config, get_env_from_file, get_components, get_ordinal_sorting, save_env_file, script_runner, script_runner_parse, unnest_list
 
 def action(components='*', rm=False, **kwargs):
     """
@@ -52,12 +52,28 @@ def action(components='*', rm=False, **kwargs):
         components_to_stop = get_ordinal_sorting(components_to_stop, config['components'])
     components_to_stop.reverse()
     for comp in components_to_stop:
-        comp_cont_name = '{}-devlab'.format(comp) #pylint: disable=duplicate-code
+        comp_cont_name = '{}-devlab'.format(comp)
         if comp == foreground_comp_name:
-            comp_type = config['foreground_component'].get('type', 'container')
+            comp_config = config['foreground_component']
         else:
-            comp_type = config['components'][comp].get('type', 'container')
+            comp_config = config['components'][comp]
+        comp_type = comp_config.get('type', 'container')
         if comp_type == 'host':
+            if 'down_scripts' in comp_config:
+                errors = False
+                for script in comp_config['down_scripts']:
+                    script_parse = script_runner_parse(script)
+                    if not script_parse['name']:
+                        if not script_parse['mode'] == 'host':
+                            log.debug("Assuming Down-script is to be run on host, because the component type is 'host'")
+                            script = 'host:{}'.format(script)
+                    log.debug("Found Down script: '%s'", script)
+                    script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
+                    if script_ret[0] != 0:
+                        errors = True
+                        break
+                if errors:
+                    break
             if up_env.get('{}_PID'.format(comp.upper()), None):
                 comp_pid = int(up_env.get('{}_PID'.format(comp.upper()), 0))
                 if comp_pid:
@@ -99,12 +115,47 @@ def action(components='*', rm=False, **kwargs):
         else:
             try:
                 if 'up' in containers_dict[comp_cont_name]['status'].lower():
+                    if 'down_scripts' in comp_config:
+                        errors = False
+                        for script in comp_config['down_scripts']:
+                            log.debug("Found Down script: '%s'", script)
+                            script_ret = script_runner(script, name=comp_cont_name, interactive=False, log_output=True)
+                            if script_ret[0] != 0:
+                                errors = True
+                                break
+                        if errors:
+                            break
                     log.info("Component: Stopping container: %s...", comp)
                     devlab_bench.helpers.docker.DOCKER.stop_container(comp_cont_name)
                 else:
+                    if 'down_scripts' in comp_config:
+                        for script in comp_config['down_scripts']:
+                            script_parse = script_runner_parse(script)
+                            if not script_parse['name']:
+                                if not script_parse['mode'] == 'host':
+                                    log.warning("Container already exited. Skipping discovered Post-Down script: '%s'", script)
+                                    continue
                     log.info("Component: %s is already stopped. skipping...", comp)
                 if rm:
                     log.info("Removing container: %s", comp)
                     devlab_bench.helpers.docker.DOCKER.rm_container(comp_cont_name, force=True)
             except KeyError:
                 log.info("Component: %s has no container. skipping...", comp)
+        if 'post_down_scripts' in comp_config:
+            errors = False
+            for script in comp_config['post_down_scripts']:
+                log.debug("Found Post-Down script: '%s'", script)
+                #Because the component is now down, these scripts can't default to running inside
+                #the component container. Check to make sure that the script isn't going to try that
+                #and default to running on the host
+                script_parse = script_runner_parse(script)
+                if not script_parse['name']:
+                    if not script_parse['mode'] == 'host':
+                        log.warning("Post-Down scripts cannot run inside of the now down container: '%s' defaulting to running on your host. Consider changing your post down script to have a 'host:' prefix to avoid this warning", comp)
+                        script = 'host:{}'.format(script)
+                script_ret = script_runner(script, name=comp_cont_name, interactive=True)
+                if script_ret[0] != 0:
+                    errors = True
+                    break
+            if errors:
+                break

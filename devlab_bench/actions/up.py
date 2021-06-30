@@ -279,7 +279,7 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
                 if 'pre_scripts' in comp_config:
                     for script in comp_config['pre_scripts']:
                         log.debug("Found Pre script: '%s'", script)
-                        script_ret = script_runner(script, name=comp_cont_name, interactive=True, log_output=True)
+                        script_ret = script_runner(script, name=comp_cont_name, interactive=True)
                         if script_ret[0] != 0:
                             errors = True
                             break
