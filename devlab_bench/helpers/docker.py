@@ -625,7 +625,10 @@ def check_build_image_need_update(image, dockerfile, logger=None):
                     log.debug("Last modified value in dockerfile: '%s' is '%s'", dockerfile, last_modified)
     if last_modified: #Check if the image has the latest 'last_modified' label
         log.debug("Looking for current last_modified label on existing image: %s", image)
-        image_details = DOCKER.inspect_image('{}:latest'.format(image))[0]['Config']
+        if not ':' in image:
+            image_details = DOCKER.inspect_image('{}:latest'.format(image))[0]['Config']
+        else:
+            image_details = DOCKER.inspect_image(image)[0]['Config']
         cur_last_modified = None
         for ilabel, ivalue in image_details['Labels'].items():
             log.debug("Found existing label: '%s' on image", ilabel)

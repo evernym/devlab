@@ -1,0 +1,32 @@
+---
+paths:
+  component_persistence: "persistence"
+  reset_paths: []
+wizard_enabled: false
+project_filter: lab.dev.customimage.example.type=devlab
+runtime_images:
+  nginx-example:
+    tag: latest
+    docker_file: docker/nginx.dockerfile
+    build_opts: []
+    ordinal:
+      group: 0
+      number: 1
+components:
+  nginx-site:
+    image: nginx-example:latest
+    enabled: true
+    ports:
+      - "80:80"
+    mounts:
+      - "config:/etc/nginx/:ro"
+      - "content:/var/www/htdocs/:ro"
+      - "persistence/nginx-site/logs:/var/log/nginx"
+    run_opts:
+      - "--restart"
+      - "unless-stopped"
+    ordinal:
+      group: 0
+      number: 0
+    reset_paths:
+      - logs/
