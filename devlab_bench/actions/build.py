@@ -1,6 +1,7 @@
 """
 Things deal with the 'build' action
 """
+import json
 import logging
 import os
 import sys
@@ -94,7 +95,7 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
             docker_helper_obj = docker_helper_base
         else:
             docker_helper_obj = docker_helper
-        images_dict[image]['docker_file'] = '{}/{}'.format(image_context, images_dict[image]['docker_file'])
+        images_dict[image]['docker_file_full_path'] = '{}/{}'.format(image_context, images_dict[image]['docker_file'])
         if 'build_opts' not in images_dict[image]:
             images_dict[image]['build_opts'] = []
         if image in base_images_to_build:
@@ -123,7 +124,7 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
                     log.debug(line)
                 log.debug("Successfully removed image: %s", image)
         if pull:
-            with open(images_dict[image]['docker_file']) as  dfile:
+            with open(images_dict[image]['docker_file_full_path']) as  dfile:
                 local_image = False
                 for line in dfile.readlines():
                     if line.startswith('FROM '):
@@ -136,7 +137,15 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
         if no_cache:
             images_dict[image]['build_opts'].append('--no-cache')
         log.info("Building image: %s", image_n_tag)
-        bld_res = docker_helper_obj.build_image(image, context=os.path.dirname(images_dict[image]['docker_file']), log_output=log_output, network=config['network']['name'], logger=logging.getLogger('Build-{}'.format(image)), **images_dict[image])
+        # Marshall the image dict to a string to make a true deep copy
+        image_args_json = json.dumps(images_dict[image])
+        image_args = json.loads(image_args_json)
+        del image_args_json
+        # Set the docker_file argument to be the full path
+        image_args['docker_file'] = image_args['docker_file_full_path']
+        del image_args['docker_file_full_path']
+        log.debug("image: '%s' context='%s' log_output='%s' other_args='%s'", image, image_context, log_output, image_args)
+        bld_res = docker_helper_obj.build_image(image, context=image_context, log_output=log_output, network=config['network']['name'], logger=logging.getLogger('Build-{}'.format(image)), **image_args)
         if bld_res[0] != 0:
             log.error("Failed building image: '%s' Aborting...", image)
             abort = True
