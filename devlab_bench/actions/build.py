@@ -60,12 +60,18 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
     if images == '*':
         needed_images = get_needed_images()
         base_images_to_build = needed_images['base_images']['missing'] + needed_images['base_images']['exists']
-        runtime_images_to_build = needed_images['runtime_images']['missing'] + needed_images['runtime_images']['exists']
+        runtime_images_to_build = []
+        for rti in needed_images['runtime_images']['missing'] + needed_images['runtime_images']['exists']:
+            if ':' in rti:
+                rti = rti.split(':')[0]
+            runtime_images_to_build.append(rti)
     else:
         for img in images:
             if img in base_images_dict:
                 base_images_to_build.append(img)
             else:
+                if ':' in img:
+                    img = img.split(':')[0]
                 runtime_images_to_build.append(img)
     try:
         images_to_build = get_ordinal_sorting(base_images_to_build, base_images_dict)
