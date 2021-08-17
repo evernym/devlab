@@ -11,7 +11,7 @@ from devlab_bench import DEVLAB_ROOT, IMAGES, PROJ_ROOT
 from devlab_bench.helpers.common import get_config, get_ordinal_sorting
 from devlab_bench.helpers.docker import docker_obj_status, DockerHelper, get_needed_images
 
-def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
+def action(images='*', clean=False, no_cache=False, pull=False, skip_pull_images=None, **kwargs):
     """
     This is responsible for building all the docker images etc...
 
@@ -23,6 +23,8 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
             building. Default=False
         pull: boolean indicating whether a --pull should happen to update base
             images. Default=False
+        skip_pull_images: list of image names to skip when 'pull' is specified
+            Default=None
     Returns:
         None
     """
@@ -46,6 +48,8 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
         ],
         common_domain=config['domain']
     )
+    if not skip_pull_images:
+        skip_pull_images = []
     if not docker_helper:
         log.warning("No docker_helper was passed, using default helper... This is probably not intended?")
         docker_helper = DockerHelper(filter_label='com.lab.type=devlab')
@@ -95,13 +99,14 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
         else:
             image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'])
         image_status = docker_obj_status(image_n_tag, 'image', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
-        image_context = PROJ_ROOT
-        if image in base_images_to_build:
+        image_context = os.path.dirname('{}/{}'.format(PROJ_ROOT, images_dict[image]['docker_file']))
+        docker_helper_obj = docker_helper
+        build_context = PROJ_ROOT
+        if image in base_images_to_build: #Override default build context for built-in images
+            build_context = DEVLAB_ROOT
             image_context = DEVLAB_ROOT
             docker_helper_obj = docker_helper_base
-        else:
-            docker_helper_obj = docker_helper
-        images_dict[image]['docker_file_full_path'] = '{}/{}'.format(image_context, images_dict[image]['docker_file'])
+        images_dict[image]['docker_file_full_path'] = '{}/{}'.format(build_context, images_dict[image]['docker_file'])
         if 'build_opts' not in images_dict[image]:
             images_dict[image]['build_opts'] = []
         if image in base_images_to_build:
@@ -130,11 +135,11 @@ def action(images='*', clean=False, no_cache=False, pull=False, **kwargs):
                     log.debug(line)
                 log.debug("Successfully removed image: %s", image)
         if pull:
-            with open(images_dict[image]['docker_file_full_path']) as  dfile:
+            with open(images_dict[image]['docker_file_full_path']) as dfile:
                 local_image = False
                 for line in dfile.readlines():
                     if line.startswith('FROM '):
-                        if line.split()[1].split(':')[0] in images_to_build:
+                        if line.split()[1].split(':')[0] in images_to_build + skip_pull_images:
                             local_image = True
                             log.debug("Skipping pull, as devlab manages this image's base image")
                             break

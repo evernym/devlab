@@ -9,6 +9,7 @@ import sys
 
 import devlab_bench
 import devlab_bench.actions.reset
+from devlab_bench.actions.update import update_component_images
 from devlab_bench.helpers.docker import get_needed_images, docker_obj_status, check_custom_registry
 from devlab_bench.helpers.common import get_config, get_env_from_file, get_ordinal_sorting, get_shell_components, get_primary_ip, quote, save_env_file, script_runner, unnest_list
 
@@ -69,7 +70,7 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
     log.debug("The following components will be started in this order: %s", ', '.join(components_to_run))
     if update_images:
         log.info("Looking for and updating images needed by components: %s", ','.join(components_to_run))
-        update_component_images(components=components_to_run)
+        update_component_images(components=components_to_run, skip_base_images=True)
     needed_images = get_needed_images()
     if needed_images['base_images']['missing'] or needed_images['base_images']['needs_update']:
         base_to_build = needed_images['base_images']['missing'] + needed_images['base_images']['needs_update']
@@ -328,34 +329,3 @@ def component_up(name, comp_config, skip_provision=False, keep_up_on_error=False
                 break
         break
     return not errors
-
-def update_component_images(components=None, logger=None):
-    """
-    Look through given components and try to build or pull new versions of the
-    image layers etc...
-
-    Args:
-        components: list, of components to use for finding images to update
-        logger: Logger object to use for log messages
-
-    Returns:
-        None
-    """
-    if logger:
-        log = logger
-    else:
-        log = logging.getLogger('update_images')
-    log.debug('Looking up images being referenced in components')
-    needed_images = get_needed_images(components, logger=log)
-    ext_images = needed_images['external_images']['exists'] + needed_images['external_images']['missing']
-    int_images = needed_images['base_images']['exists'] + needed_images['base_images']['missing']
-    int_images += needed_images['runtime_images']['exists'] + needed_images['runtime_images']['missing']
-    log_output = True
-    log.info("Building/Updating devlab and project's managed images: '%s'", ','.join(int_images))
-    devlab_bench.actions.build.action(int_images, clean=True, pull=True)
-    for ext_image in ext_images:
-        log.info("Pulling down any updates to image: '%s'", ext_image)
-        pi_res = devlab_bench.helpers.docker.DOCKER.pull_image(ext_image, log_output=log_output, logger=log)
-        if pi_res[0] != 0:
-            log.error("Failed pulling updates for image: %s", ext_image)
-            sys.exit(1)

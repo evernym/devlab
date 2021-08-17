@@ -116,10 +116,16 @@ if __name__ == '__main__':
     PARSER_UP.set_defaults(func=devlab_bench.actions.up.action)
 
     # Add subparser for update action
-    PARSER_UPDATE = SUBPARSERS.add_parser('update', help='Update devlab to the latest released version')
-    PARSER_UPDATE.add_argument('--uninstall', '-U', action='store_true', help='Instead of updating using the installer, uninstall it')
-    PARSER_UPDATE.add_argument('--set-version', '-V', default=None, help='Update/Downgrade to a specific version of devlab')
+    PARSER_UPDATE = SUBPARSERS.add_parser('update', help='Update images used by component using combination of docker pull and/or docker build')
+    PARSER_UPDATE.add_argument('components', nargs='*', default='*', type=get_components, help='Update the image(s) used by one or more components based on name of glob match. COMPONENTS: {}'.format(', '.join(CUR_COMPONENTS)))
+    PARSER_UPDATE.add_argument('--skip-base-images', '-B', action='store_true', help='Skip updating built-in base devlab images')
     PARSER_UPDATE.set_defaults(func=devlab_bench.actions.update.action)
+
+    # Add subparser for upgrade action
+    PARSER_UPGRADE = SUBPARSERS.add_parser('upgrade', help='Upgrade devlab to the latest released version')
+    PARSER_UPGRADE.add_argument('--uninstall', '-U', action='store_true', help='Instead of updating using the installer, uninstall it')
+    PARSER_UPGRADE.add_argument('--set-version', '-V', default=None, help='Update/Downgrade to a specific version of devlab')
+    PARSER_UPGRADE.set_defaults(func=devlab_bench.actions.upgrade.action)
 
     # Add subparser for restart
     PARSER_RESTART = SUBPARSERS.add_parser('restart', help='Restart components')
@@ -144,7 +150,7 @@ if __name__ == '__main__':
 
     #The 'update' action is special and doesn't need all of the checks or a devlab_bench.PROJ_ROOT etc..
     #it also will exit after executing
-    if ARGS.func in [devlab_bench.actions.update.action, devlab_bench.actions.global_status.action, action_default]:
+    if ARGS.func in [devlab_bench.actions.upgrade.action, devlab_bench.actions.global_status.action, action_default]:
         ARGS.func(**vars(ARGS))
 
     if ARGS.project_root:
@@ -153,7 +159,7 @@ if __name__ == '__main__':
     if not devlab_bench.PROJ_ROOT:
         #Running Adhoc without a project won't get us a DockerHelper object.
         #this will create one if none has been set.
-        if ARGS.func == devlab_bench.actions.shell.action and ARGS.components == ['adhoc']: #pylint: disable=comparison-with-callable
+        if ARGS.func == devlab_bench.actions.shell.action and ARGS.components == ['adhoc']: #pylint: disable=bad-option-value,comparison-with-callable
             devlab_bench.PROJ_ROOT = os.path.abspath('.')
             devlab_bench.helpers.docker.DOCKER = DockerHelper(
                 labels=[
@@ -177,7 +183,7 @@ if __name__ == '__main__':
     devlab_bench.CONFIG = get_config()
 
     #If we're doing an 'up' action, check for and run wizard
-    if ARGS.func == devlab_bench.actions.up.action: #pylint: disable=comparison-with-callable
+    if ARGS.func == devlab_bench.actions.up.action: #pylint: disable=bad-option-value,comparison-with-callable
         if devlab_bench.CONFIG['wizard_enabled']:
             if os.path.isfile('{}/wizard'.format(devlab_bench.PROJ_ROOT)):
                 LOGGER.debug("Running wizard, in case it needs to be run")

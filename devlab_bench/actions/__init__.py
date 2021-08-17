@@ -9,6 +9,7 @@ import devlab_bench.actions.reset
 import devlab_bench.actions.shell
 import devlab_bench.actions.status
 import devlab_bench.actions.up
+import devlab_bench.actions.upgrade
 import devlab_bench.actions.update
 
 __all__ = [
