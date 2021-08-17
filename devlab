@@ -159,7 +159,7 @@ if __name__ == '__main__':
     if not devlab_bench.PROJ_ROOT:
         #Running Adhoc without a project won't get us a DockerHelper object.
         #this will create one if none has been set.
-        if ARGS.func == devlab_bench.actions.shell.action and ARGS.components == ['adhoc']: #pylint: disable=bad-option-value
+        if ARGS.func == devlab_bench.actions.shell.action and ARGS.components == ['adhoc']: #pylint: disable=bad-option-value,comparison-with-callable
             devlab_bench.PROJ_ROOT = os.path.abspath('.')
             devlab_bench.helpers.docker.DOCKER = DockerHelper(
                 labels=[
@@ -183,7 +183,7 @@ if __name__ == '__main__':
     devlab_bench.CONFIG = get_config()
 
     #If we're doing an 'up' action, check for and run wizard
-    if ARGS.func == devlab_bench.actions.up.action: #pylint: disable=bad-option-value
+    if ARGS.func == devlab_bench.actions.up.action: #pylint: disable=bad-option-value,comparison-with-callable
         if devlab_bench.CONFIG['wizard_enabled']:
             if os.path.isfile('{}/wizard'.format(devlab_bench.PROJ_ROOT)):
                 LOGGER.debug("Running wizard, in case it needs to be run")
