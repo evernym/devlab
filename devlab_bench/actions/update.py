@@ -1,48 +1,61 @@
 """
-Things dealing with the 'update' action
+Deals with updating images used by components
 """
 import logging
 import sys
 
-import devlab_bench
-from devlab_bench.helpers.command import Command
+import devlab_bench.helpers.docker
+import devlab_bench.actions.build
+from devlab_bench.helpers.docker import get_needed_images
 
-def action(uninstall=False, set_version=None, **kwargs):
+def action(components='*', skip_base_images=False, **kwargs):
     """
-    Attempt to update devlab. This will cause call sys.exit
-
-    exit code is 0 upon success and 1 if not
-    """
-    if update_devlab(uninstall=uninstall, set_version=set_version, **kwargs):
-        sys.exit(0)
-    else:
-        sys.exit(1)
-
-def update_devlab(uninstall=False, set_version=None, **kwargs):
-    """
-    Use the installer to try and update devlab to the latest version in the repo
+    This is for updating images used by components
 
     Args:
-        uninstall: bool, indicating to uninstall instead of update
-        set_version: str, indicating a specific version of devlab to install
-
+        components: list of components or image names to update, this can also be
+            the string '*'
+        include_base_images: Bool whether to inlcude the devlab base images when updating
     Returns:
-        Bool, True if successful False if not
+        None
     """
     ignored_args = kwargs
-    log = logging.getLogger("UpdateDevlab")
-    log.debug("Running installer.py to check for updates etc...")
-    command = '{}/installer.py'.format(devlab_bench.DEVLAB_ROOT)
-    args = []
-    if uninstall and set_version:
-        log.error("Cannot uninstall a specific version. Uninstall takes no argument")
-        return False
-    if uninstall:
-        args.append('uninstall')
-    if set_version:
-        args += ['install', '--set-version', set_version]
-    inst_out = Command(command, args, interactive=True).run()
-    if inst_out[0] != 0:
-        log.error("Installer did not exit successfully... Aborting!")
-        return False
-    return True
+    log = logging.getLogger("UpdateImages")
+    if components == '*':
+        components = None
+    update_component_images(components, skip_base_images=skip_base_images, logger=log)
+
+def update_component_images(components=None, skip_base_images=True, logger=None):
+    """
+    Look through given components and try to build or pull new versions of the
+    image layers etc...
+
+    Args:
+        components: list, of components to use for finding images to update
+        include_base_images: Bool whether to include base images when updating
+        logger: Logger object to use for log messages
+
+    Returns:
+        None
+    """
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('update_images')
+    log.debug('Looking up images being referenced in components')
+    needed_images = get_needed_images(components, logger=log)
+    ext_images = needed_images['external_images']['exists'] + needed_images['external_images']['missing']
+    int_images = []
+    base_images = needed_images['base_images']['exists'] + needed_images['base_images']['missing']
+    if not skip_base_images:
+        int_images += base_images
+    int_images += needed_images['runtime_images']['exists'] + needed_images['runtime_images']['missing']
+    log_output = True
+    log.info("Building/Updating devlab and project's managed images: '%s'", ','.join(int_images))
+    devlab_bench.actions.build.action(int_images, skip_pull_images=base_images, clean=True, pull=True)
+    for ext_image in ext_images:
+        log.info("Pulling down any updates to image: '%s'", ext_image)
+        pi_res = devlab_bench.helpers.docker.DOCKER.pull_image(ext_image, log_output=log_output, logger=log)
+        if pi_res[0] != 0:
+            log.error("Failed pulling updates for image: %s", ext_image)
+            sys.exit(1)
