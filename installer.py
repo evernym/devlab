@@ -146,6 +146,24 @@ def action_install(repo_path, set_version=None, **kwargs):
                 exc_val=exc_value
             )
             log.error(exc_str)
+        if not distutils.spawn.find_executable('python'):
+            log.warning("The executable 'python' is not found in your PATH. Checking for others...")
+            for path in os.environ.get('PATH', '/usr/bin:/bin:/usr/local/bin').split(':'):
+                found_files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)) and re.match(r'python[0-9\.]*$', f)]
+                found_files = list(map(lambda ff: '{}/{}'.format(path, ff), found_files)) #pylint: disable=cell-var-from-loop
+                if found_files:
+                    python_executable = found_files[0]
+                    log.info("Found a python executable at: '%s'", python_executable)
+                    log.info("Updating devlab's shebang to the correct path to your python executable")
+                    devlab_bin_path = '{}/devlab/devlab'.format(homedir)
+                    with open(devlab_bin_path, 'r') as devlab_bin:
+                        devlab_bin_contents = devlab_bin.read()
+                    devlab_bin_contents = devlab_bin_contents.splitlines()
+                    devlab_bin_contents[0] = '#!/usr/bin/env {}'.format(os.path.basename(python_executable))
+                    devlab_bin_contents = '\n'.join(devlab_bin_contents)
+                    with open(devlab_bin_path, 'w') as devlab_bin:
+                        devlab_bin.write(devlab_bin_contents)
+                    break
     else:
         log.error("Failed downloading tarball")
 
