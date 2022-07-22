@@ -6,8 +6,8 @@ import logging
 import os
 import sys
 
+import devlab_bench
 import devlab_bench.helpers.docker
-from devlab_bench import DEVLAB_ROOT, IMAGES, PROJ_ROOT
 from devlab_bench.helpers.common import get_config, get_ordinal_sorting
 from devlab_bench.helpers.docker import docker_obj_status, DockerHelper, get_needed_images
 
@@ -39,7 +39,7 @@ def action(images='*', clean=False, no_cache=False, pull=False, skip_pull_images
     log.debug("Will build with no_cache set to: %s", no_cache)
     log.debug("Will build with pull set to: %s", pull)
     config = get_config()
-    base_images_dict = dict(IMAGES)
+    base_images_dict = dict(devlab_bench.IMAGES)
     images_dict = dict(base_images_dict)
     docker_helper = devlab_bench.helpers.docker.DOCKER
     docker_helper_base = DockerHelper(
@@ -99,12 +99,12 @@ def action(images='*', clean=False, no_cache=False, pull=False, skip_pull_images
         else:
             image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'])
         image_status = docker_obj_status(image_n_tag, 'image', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
-        image_context = os.path.dirname('{}/{}'.format(PROJ_ROOT, images_dict[image]['docker_file']))
+        image_context = os.path.dirname('{}/{}'.format(devlab_bench.PROJ_ROOT, images_dict[image]['docker_file']))
         docker_helper_obj = docker_helper
-        build_context = PROJ_ROOT
+        build_context = devlab_bench.PROJ_ROOT
         if image in base_images_to_build: #Override default build context for built-in images
-            build_context = DEVLAB_ROOT
-            image_context = DEVLAB_ROOT
+            build_context = devlab_bench.DEVLAB_ROOT
+            image_context = devlab_bench.DEVLAB_ROOT
             docker_helper_obj = docker_helper_base
         images_dict[image]['docker_file_full_path'] = '{}/{}'.format(build_context, images_dict[image]['docker_file'])
         if 'build_opts' not in images_dict[image]:
