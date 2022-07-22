@@ -35,7 +35,7 @@ else
         release_ver=$(echo "$legacy_last_release" | cut -d ' ' -f 3)
     fi
 fi
-echo "Getting changes comit changes between: ${beg_range}${last_change}"
+echo "Getting commit changes between: ${beg_range}${last_change}"
 changes_since_release=$(git log --pretty=format:'%s%n' ${beg_range}${last_change} | sed "/^Merge branch '.\+' into '.\+'/d ; /^Merge branch '.\+' of .\+/d; /^$/d")
 
 if [ $(echo "$changes_since_release" | wc -l) -gt 0 ] ; then
