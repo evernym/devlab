@@ -395,9 +395,9 @@ def list_packages(path, logger):
     else:
         logger = logging.getLogger('list_packages')
     packages = {}
-    path = path.lower()
     found_files = []
     if 'http' in path:
+        path = path.lower()
         log.debug("Repo path is an HTTP url")
         if 'github.com/' in path and path.endswith('releases'):
             log.debug('Repo path is a github releases url. Looking for devlab packages in releases')
