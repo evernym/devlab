@@ -6,7 +6,7 @@ import logging
 import devlab_bench.actions.down
 import devlab_bench.actions.up
 from devlab_bench.helpers.common import get_components, unnest_list
-def action(components='*', update_images=False, **kwargs):
+def action(components='*', logger=None, update_images=False, **kwargs):
     """
     Restart components by bringing them down and then back up again
 
@@ -15,7 +15,10 @@ def action(components='*', update_images=False, **kwargs):
     """
     #restart
     ignored_args = kwargs
-    log = logging.getLogger('Restart')
+    if logger:
+        log = logger
+    else:
+        log = logging.getLogger('Restart')
     components_to_restart = components
     rm = False
     if isinstance(components, str):
