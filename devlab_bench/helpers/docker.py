@@ -452,7 +452,7 @@ class DockerHelper(object):
             logger=self.log
         ).run()
         return cmd_ret
-    def run_container(self, image, name, network=None, ports=None, background=True, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, run_opts=None, **kwargs): #pylint: disable=too-many-arguments
+    def run_container(self, image, name, network=None, ports=None, background=True, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, systemd_tmpfs_args=None, run_opts=None, **kwargs): #pylint: disable=too-many-arguments
         """
         Run a docker_container
 
@@ -473,6 +473,8 @@ class DockerHelper(object):
                 'docker run'. (OPTIONAL)
             systemd_support: bool, whether to enable opts to let systemd work
                 inside the container. (OPTIONAL)
+            systemd_tmpfs_args: comma separated string of arguments to pass to
+                the --tmpfs argument when systemd_support is True
         Returns:
             tuple where:
                 First Element is the return code from docker
@@ -498,10 +500,12 @@ class DockerHelper(object):
         if network:
             opts.append("--network={}".format(network))
         if systemd_support:
+            if systemd_tmpfs_args:
+                systemd_tmpfs_args=':{}'.format(systemd_tmpfs_args)
             opts += [
-                '--tmpfs=/run',
-                '--tmpfs=/run/lock',
-                '--tmpfs=/tmp',
+                '--tmpfs=/run{}'.format(systemd_tmpfs_args),
+                '--tmpfs=/run/lock{}'.format(systemd_tmpfs_args),
+                '--tmpfs=/tmp{}'.format(systemd_tmpfs_args),
                 '--volume=/sys/fs/cgroup:/sys/fs/cgroup:ro',
                 '-t' #This is needed so that 'docker logs' will show systemd output
             ]

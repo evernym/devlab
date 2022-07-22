@@ -98,6 +98,11 @@ if __name__ == '__main__':
     PARSER_RESET.add_argument('--full', '-f', action='store_true', help='Remove all component specific files, wizard files, as well as devlab files AND potentially files you\'re working on. BE CAREFUL IF YOU HAVE MANUAL CHANGES IN PATHS DEFINED IN YOUR \'paths.reset_full\'!!')
     PARSER_RESET.set_defaults(func=devlab_bench.actions.reset.action)
 
+    #Add Subparser for global_restart action
+    PARSER_GLOBAL_RESTART = SUBPARSERS.add_parser('global-restart', help='Restart components across all environments managed by devlab')
+    PARSER_GLOBAL_RESTART.add_argument('--update-images', '-u', action='store_true', help='Look for images that components are using, and try to either build new versions, or pull new ones')
+    PARSER_GLOBAL_RESTART.set_defaults(func=devlab_bench.actions.global_restart.action)
+
     #Add Subparser for global_status action
     PARSER_GLOBAL_STATUS = SUBPARSERS.add_parser('global-status', help='Get a global status of all environments where devlab has created containers')
     PARSER_GLOBAL_STATUS.set_defaults(func=devlab_bench.actions.global_status.action)
@@ -150,7 +155,12 @@ if __name__ == '__main__':
 
     #The 'update' action is special and doesn't need all of the checks or a devlab_bench.PROJ_ROOT etc..
     #it also will exit after executing
-    if ARGS.func in [devlab_bench.actions.upgrade.action, devlab_bench.actions.global_status.action, action_default]:
+    if ARGS.func in [
+            devlab_bench.actions.upgrade.action,
+            devlab_bench.actions.global_restart.action,
+            devlab_bench.actions.global_status.action,
+            action_default
+        ]:
         ARGS.func(**vars(ARGS))
 
     if ARGS.project_root:

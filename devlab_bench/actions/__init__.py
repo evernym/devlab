@@ -3,6 +3,7 @@ Initialize the different action types available
 """
 import devlab_bench.actions.build
 import devlab_bench.actions.down
+import devlab_bench.actions.global_restart
 import devlab_bench.actions.global_status
 import devlab_bench.actions.restart
 import devlab_bench.actions.reset
@@ -15,6 +16,7 @@ import devlab_bench.actions.update
 __all__ = [
     'build',
     'down',
+    'global_restart',
     'global_status',
     'restart',
     'reset',

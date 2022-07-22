@@ -40,7 +40,7 @@ If you would like contribute to this project, please do the following:
 1. **Wizard**: A script that is run before the `up` action. After the wizard has been executed a proper [DevlabConfig.json or DevlabConfig.yaml](#devlab-configuration) should exist. It is normal for the wizard to result in more files than just a `DevlabConfig.json` or `DevlabConfig.yaml`, and those files can be added to the config so that devlab can reset the wizard (forcing it to run again) if so desired.
 
 # Usage
-All actions have a `--help` which should display relevent help. The following options below are "global" options and *should* preceed any action:
+All actions have a `--help` which should display relevent help. The following options below are "common" options and *should* preceed any action:
 
 ```
   -h, --help            show this help message and exit
@@ -49,7 +49,7 @@ All actions have a `--help` which should display relevent help. The following op
 ```
 
 The format of the command should be:
-`devlab <global options> <action> <action options>`
+`devlab <common options> <action> <action options>`
 
 The "wizard" logic will be invoked the first time you run a `devlab up` command. This can be invoked separately with `wizard` if you so desire.
 
@@ -128,6 +128,7 @@ The structure looks like this:
 {
     "image": "",
     "systemd_support": false,
+    "systemd_tmpfs_args": "",
     "enabled": false,
     "cmd": "",
     "ports": [],
@@ -153,6 +154,7 @@ All Keys that are in **bold** are required
 | --- |  ---  | ---               |
 | **image** | String | A docker notation of docker image to use for the component. This can also reference a devlab base image, as well as a project's [runtime image](#runtime-image-structure) | 
 | systemd_support | Boolean | If set to `true` then this will start the component with proper `/run`, `/run/lock`, `/tmp`, and `/sys/fs/cgroup` mounts so systemd can run |
+| systemd_tmpfs_args | String | If `systemd_support` is set to `true`, and this argument is set, then the value is appended to the tmpfs mounts as arguments for systemd support. This way you can specify things like: `rw`, `exec`, etc... |
 | **enabled** | Boolean | Whether or not the component should be brought [up](#up-action) and images [built](#build-action) |
 | **_name_** | String | This is only supported for `foreground_components` but required. It indicates the name of the component |
 | type | String | This only only supported for `foreground_components`, but can be either `host` or `container`. If set to host then `cmd` is executed on the local system instead of a container |
@@ -457,7 +459,7 @@ foreground_component:
 ```
 
 # Devlab Argument documentation
-All actions have a `--help` which should display relevent help. The following options below are "global" options and *should* preceed any action:
+All actions have a `--help` which should display relevent help. The following options below are "common" options and *should* preceed any action:
 
 ```
   -h, --help            show this help message and exit
@@ -466,7 +468,7 @@ All actions have a `--help` which should display relevent help. The following op
 ```
 
 The format of the command should be:
-`devlab <global options> <action> <action options>`
+`devlab <common options> <action> <action options>`
 
 For example. To bring the environment up with debug level messages:
 `devlab -l debug up`
@@ -481,6 +483,7 @@ For example. To bring the environment up with debug level messages:
                         including persistent data. This is useful if you want
                         to have a component start from scratch without re-
                         running the wizard
+    global-restart      Restart components across all environments managed by devlab
     global-status       Get a global status of all environments where devlab
                         has created containers
     status              Get a status of the environment
