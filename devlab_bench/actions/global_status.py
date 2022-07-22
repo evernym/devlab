@@ -1,5 +1,5 @@
 """
-Things dealing with the 'global_satus' action
+Things dealing with the 'global_status' action
 """
 import sys
 
