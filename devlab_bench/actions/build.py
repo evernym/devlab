@@ -135,16 +135,23 @@ def action(images='*', clean=False, no_cache=False, pull=False, skip_pull_images
                     log.debug(line)
                 log.debug("Successfully removed image: %s", image)
         if pull:
-            with open(images_dict[image]['docker_file_full_path']) as dfile:
-                local_image = False
-                for line in dfile.readlines():
-                    if line.startswith('FROM '):
-                        if line.split()[1].split(':')[0] in images_to_build + skip_pull_images:
-                            local_image = True
-                            log.debug("Skipping pull, as devlab manages this image's base image")
-                            break
-                if not local_image:
-                    images_dict[image]['build_opts'].append('--pull')
+            local_image = False
+            if image in skip_pull_images:
+                log.info("Image: %s was explicitly excluded from being pulled from a calling function, Skipping", image)
+                local_image = True
+            elif image not in base_images_to_build and config['runtime_images'][image].get('skip_pull', False):
+                log.info("Runtime image: %s is explicitely set to not be pulled in Devlabconfig, skipping pull argument when building", image)
+                local_image = True
+            else:
+                with open(images_dict[image]['docker_file_full_path']) as dfile:
+                    for line in dfile.readlines():
+                        if line.startswith('FROM '):
+                            if line.split()[1].split(':')[0] in images_to_build + skip_pull_images:
+                                local_image = True
+                                log.debug("Skipping pull, as devlab manages this image's base image")
+                                break
+            if not local_image:
+                images_dict[image]['build_opts'].append('--pull')
         if no_cache:
             images_dict[image]['build_opts'].append('--no-cache')
         log.info("Building image: %s", image_n_tag)
