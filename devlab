@@ -214,6 +214,23 @@ if __name__ == '__main__':
             LOGGER.error("No configured components found!... aborting")
             sys.exit(1)
 
+    #Check min devlab version if set
+    if devlab_bench.CONFIG.get('min_devlab_version', None):
+        MIN_DEVLAB_VERSION = devlab_bench.CONFIG['min_devlab_version']
+        #Assume that "master" version is newer that min version and only if the version doesn't match
+        if __VERSION__ not in ["master", MIN_DEVLAB_VERSION]:
+            VERS_SORT = sorted(
+                [
+                    __VERSION__,
+                    MIN_DEVLAB_VERSION
+                ],
+                key=devlab_bench.helpers.common.human_keys
+            )
+            if VERS_SORT[-1] != __VERSION__:
+                LOGGER.error("This devlab project requuires a minimum version of: '%s' Found: '%s' installed. Please upgrade", MIN_DEVLAB_VERSION, __VERSION__)
+                sys.exit(1)
+        LOGGER.debug("Current version of devlab: '%s' matches or excedes required minimum version: '%s'", __VERSION__, MIN_DEVLAB_VERSION)
+
     #Create our DockerHelper Object
     devlab_bench.helpers.docker.DOCKER = DockerHelper(
         filter_label=devlab_bench.CONFIG['project_filter'],
