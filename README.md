@@ -96,6 +96,7 @@ pip3 install pyyaml
 The configuration file has the following base structure:
 ```
 {
+    "min_devlab_version": "",
     "components": {},
     "domain": "",
     "foreground_component": {},
@@ -115,6 +116,7 @@ All Keys that are in **bold** are required to be in the config
 | domain | String | The domain name to assign to all component's hostname inside the container |
 | **components** | Hash of Hashes | Defines the components to start up. The First level key is a string of the name of the container. Structure conforms to the [Component Config Structure](#component-config-structure) |
 | foreground_component | Hash | Defines a component that will be startup up after ***all*** other components and will run in the foreground. After the process exits, all ther components will be stopped. Same structure as [Component Config Structure](#component-config-structure) with one additional key `name` to indicate the name of the foreground component |
+| min_devlab_version | String | The minimum version of devlab that the project requires. Useful when taking advantage of new features and ensuring users of your project are updated to a version that supports the features you're using |
 | network | Hash | Defines a docker network to create and/or attach components to. Structure conforms to [Network Config Structure](#network-config-structure) |
 | **paths** | Hash | Defines the persistence directory for components, as well as files that should be deleted during the [reset](#reset-action) action. Structure conforms to [Paths Config Structure](#paths-config-structure) |
 | **project_filter** | String | A unique docker label that is used to identify containers and images that belong to the project. |
@@ -130,6 +132,8 @@ The structure looks like this:
     "systemd_support": false,
     "systemd_tmpfs_args": "",
     "enabled": false,
+    "env": {},
+    "env_file": "",
     "cmd": "",
     "ports": [],
     "mounts": [],
@@ -157,7 +161,9 @@ All Keys that are in **bold** are required
 | systemd_tmpfs_args | String | If `systemd_support` is set to `true`, and this argument is set, then the value is appended to the tmpfs mounts as arguments for systemd support. This way you can specify things like: `rw`, `exec`, etc... |
 | **enabled** | Boolean | Whether or not the component should be brought [up](#up-action) and images [built](#build-action) |
 | **_name_** | String | This is only supported for `foreground_components` but required. It indicates the name of the component |
-| type | String | This only only supported for `foreground_components`, but can be either `host` or `container`. If set to host then `cmd` is executed on the local system instead of a container |
+| type | String | This is only supported for `foreground_components`, but can be either `host` or `container`. If set to host then `cmd` is executed on the local system instead of a container |
+| env | Hash | Key value pairs of environment variables to set for the component |
+| env_file | String | Path to a file containing environment variables for the component. This fills in the `--env-file` option for the `docker run` command
 | cmd | String | This is the command passed to the container as part of the `docker run` command. If `type` is set to `host` then the command is executed on the local system |
 | ports | List of Strings | The ports that should be "published" using the same notation as the `--publish` option to `docker run` |
 | mounts | List of Strings | List of mounts in the format `SOURCE_ON_HOST:DESTINATION_IN_CONTAINER`. If using a relative path then the paths are relative to the project's root |
@@ -220,6 +226,7 @@ The structure looks like this:
     "tag": ""|[],
     "docker_file": "",
     "build_opts": [],
+    "skip_pull": BOOL, 
     "ordinal": {
         "group": INT,
         "number": INT 
@@ -233,6 +240,7 @@ All Keys that are in **bold** are required
 | **tag** | String or List of Strings | This is a tag that should be applied to the image. If a list is passed, the first tag becomes a primary identifier. |
 | **docker_file** | String | Path to the docker file, relative to the project's root to use when building the image. ***[NOTE]*** The build context will be the parent directory of the dockerfile's path |
 | build_opts | List of Strings | Additional options to pass to the `docker build` command. Each CLI arg must be it's own element. For example: `[ '--build-arg', 'foo=bar' ]` would become `docker build --build-arg foo=bar PATH...` etc... |
+| skip_pull | Boolean | Whether or not a forced pull does anything. There are cases where an image is built locally used elsewhere, so a pull will fail since it isn't on docker hub. If this is `true`, then even when a build is requesting a `pull` it will skip it for this image |
 | ordinal | Hash | This is used indicate the order of the images to build. When parallel execution is supported, the `group` key indicates the image that can be built at the same time, `number` indicates the order inside the group to start up |
 
 _**[NOTE]**_ Devlab supports a special label (`last_modified`).
