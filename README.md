@@ -226,7 +226,7 @@ The structure looks like this:
     "tag": ""|[],
     "docker_file": "",
     "build_opts": [],
-    "skip_pull": BOOL, 
+    "skip_pull": BOOL,
     "ordinal": {
         "group": INT,
         "number": INT 
