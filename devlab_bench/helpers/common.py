@@ -19,7 +19,7 @@ from devlab_bench.exceptions import DevlabComponentError
 #Python2/3 compatibility
 try:
     #Python2
-    text_input = raw_input #pylint: disable=invalid-name
+    text_input = globals()['__builtins__'].raw_input #pylint: disable=invalid-name
     from pipes import quote #pylint: disable=unused-import
     try:
         from pathlib2 import Path #pylint: disable=unused-import
