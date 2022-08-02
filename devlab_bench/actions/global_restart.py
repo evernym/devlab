@@ -18,7 +18,7 @@ def action(**kwargs):
     )
     containers = global_devlab_docker.get_containers()[1]
     project_map = {}
-    log.info("containers='%s'", containers)
+    log.info("Devlab related containers to restart: '%s'", containers)
     for cont in containers:
         cont_name = cont['name']
         comp_name = cont_name
