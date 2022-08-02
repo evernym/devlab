@@ -19,7 +19,7 @@ from devlab_bench.exceptions import DevlabComponentError
 #Python2/3 compatibility
 try:
     #Python2
-    text_input = raw_input #pylint: disable=invalid-name
+    text_input = globals()['__builtins__'].raw_input #pylint: disable=invalid-name
     from pipes import quote #pylint: disable=unused-import
     try:
         from pathlib2 import Path #pylint: disable=unused-import
@@ -262,21 +262,6 @@ def get_ordinal_sorting(components, config_components):
             num = 100
         ordinals['{}:{}|{}'.format(grp, num, comp)] = comp
     log.debug("Ordinals found for components: %s", ordinals)
-    def human_keys(astr):
-        """
-        Sorts keys based on human order.. IE 1 is less than 10 etc..
-
-        alist.sort(key=human_keys) sorts in human order
-        """
-        keys = []
-        for elt in re.split(r'(\d+)', astr):
-            elt = elt.swapcase()
-            try:
-                elt = int(elt)
-            except ValueError:
-                pass
-            keys.append(elt)
-        return keys
     #Get the list of ordinals, and human sort them
     ordinal_list = sorted(tuple(ordinals.keys()), key=human_keys)
     log.debug("Sorted list of ordinals: '%s'", ', '.join(ordinal_list))
@@ -328,7 +313,7 @@ def get_proj_root(start_dir=None):
     start_dir = os.path.abspath(start_dir)
     cur_dir = start_dir
     found = False
-    while cur_dir != None:
+    while cur_dir is not None:
         if os.path.basename(cur_dir) != 'defaults':
             for cfile_name in devlab_bench.CONFIG_FILE_NAMES:
                 if os.path.isfile('{}/{}'.format(cur_dir, cfile_name)):
@@ -367,6 +352,22 @@ def get_shell_components(filter_list):
     specific virtual components
     """
     return get_components(filter_list=filter_list, virtual_components=('adhoc',))
+
+def human_keys(astr):
+    """
+    Sorts keys based on human order.. IE 1 is less than 10 etc..
+
+    alist.sort(key=human_keys) sorts in human order
+    """
+    keys = []
+    for elt in re.split(r'(\d+)', astr):
+        elt = elt.swapcase()
+        try:
+            elt = int(elt)
+        except ValueError:
+            pass
+        keys.append(elt)
+    return keys
 
 def is_valid_hostname(hostname):
     """
@@ -540,8 +541,6 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
         if '=' in script_arg:
             if not script_end_env:
                 log.debug("Found environment variable for script: '%s'", script_arg)
-                script_run_opts.append('-e')
-                script_run_opts.append(script_arg)
                 e_var, e_val = script_arg.split('=')
                 env_map[e_var] = e_val
                 continue
@@ -570,6 +569,7 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
             mounts=[
                 '{}:/devlab'.format(devlab_bench.PROJ_ROOT)
             ],
+            env=env_map,
             background=False,
             interactive=interactive,
             cmd=script_stripped,
@@ -595,6 +595,7 @@ def script_runner(script, name, ignore_nonzero_rc=False, interactive=True, log_o
             name=name,
             background=False,
             interactive=interactive,
+            env=env_map,
             cmd=script_stripped,
             ignore_nonzero_rc=ignore_nonzero_rc,
             logger=log,

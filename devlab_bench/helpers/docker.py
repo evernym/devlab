@@ -452,7 +452,7 @@ class DockerHelper(object):
             logger=self.log
         ).run()
         return cmd_ret
-    def run_container(self, image, name, network=None, ports=None, background=True, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, systemd_tmpfs_args=None, run_opts=None, **kwargs): #pylint: disable=too-many-arguments
+    def run_container(self, image, name, network=None, ports=None, background=True, env=None, env_file=None, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, systemd_tmpfs_args=None, run_opts=None, **kwargs): #pylint: disable=too-many-arguments
         """
         Run a docker_container
 
@@ -461,6 +461,8 @@ class DockerHelper(object):
             name: str, The name of the container (this also sets the hostname)
             network: str, docker network to attach
             cmd: str, Command to run inside the container. (OPTIONAL)
+            env: dict, key/values of environment vars to set (OPTIONAL)
+            env_file: str, path to a file to set environment vars (OPTIONAL)
             ports: list/tuple, of ports to publish to the host. (OPTIONAL)
             background: Run the container in the background. (OPTIONAL)
             interactive: bool, whether or not the docker command could require
@@ -499,9 +501,15 @@ class DockerHelper(object):
             opts.append("--detach")
         if network:
             opts.append("--network={}".format(network))
+        if env:
+            for e_var, e_val in env.items():
+                opts.append("--env")
+                opts.append("{}={}".format(e_var, e_val))
+        if env_file:
+            opts.append("--env-file={}".format(env_file))
         if systemd_support:
             if systemd_tmpfs_args:
-                systemd_tmpfs_args=':{}'.format(systemd_tmpfs_args)
+                systemd_tmpfs_args = ':{}'.format(systemd_tmpfs_args)
             opts += [
                 '--tmpfs=/run{}'.format(systemd_tmpfs_args),
                 '--tmpfs=/run/lock{}'.format(systemd_tmpfs_args),
