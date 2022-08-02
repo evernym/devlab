@@ -19,7 +19,9 @@ from devlab_bench.exceptions import DevlabComponentError
 #Python2/3 compatibility
 try:
     #Python2
-    text_input = globals()['__builtins__'].raw_input #pylint: disable=invalid-name
+    ## NOTE __builtins__ is a "dict" when used inside a module, otherwise in "__main__" it is a module.
+    ## See the "implementation detail" at the bottom of: https://docs.python.org/3.8/library/builtins.html
+    text_input = __builtins__['raw_input'] #pylint: disable=invalid-name
     from pipes import quote #pylint: disable=unused-import
     try:
         from pathlib2 import Path #pylint: disable=unused-import
@@ -34,7 +36,7 @@ try:
                 Return the expanded path to the user's home
                 """
                 return os.path.expanduser('~')
-except AttributeError:
+except KeyError:
     #Python3
     text_input = input #pylint: disable=invalid-name
     quote = shlex.quote #pylint: disable=invalid-name
