@@ -34,7 +34,7 @@ try:
                 Return the expanded path to the user's home
                 """
                 return os.path.expanduser('~')
-except NameError:
+except AttributeError:
     #Python3
     text_input = input #pylint: disable=invalid-name
     quote = shlex.quote #pylint: disable=invalid-name
