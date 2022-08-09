@@ -24,7 +24,10 @@ import json
 
 class SafeLoaderIgnoreUnknown(yaml.SafeLoader):
     def ignore_unknown(self, node):
-        return None
+        if isinstance(node.value, str):
+            return node.value
+        else:
+            return None
 
 class FindInMapLoader(SafeLoaderIgnoreUnknown):
     def list_map(self, keys):
