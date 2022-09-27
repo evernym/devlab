@@ -452,7 +452,7 @@ class DockerHelper(object):
             logger=self.log
         ).run()
         return cmd_ret
-    def run_container(self, image, name, network=None, ports=None, background=True, env=None, env_file=None, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, systemd_tmpfs_args=None, run_opts=None, **kwargs): #pylint: disable=too-many-arguments
+    def run_container(self, image, name, network=None, ports=None, background=True, env=None, env_file=None, interactive=False, ignore_nonzero_rc=False, cmd=None, logger=None, mounts=None, systemd_support=False, systemd_tmpfs_args='', run_opts=None, **kwargs): #pylint: disable=too-many-arguments
         """
         Run a docker_container
 
