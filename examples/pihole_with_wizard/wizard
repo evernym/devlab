@@ -33,6 +33,7 @@ PROJ_ROOT = os.path.dirname(os.path.realpath(__file__))
 CONFIG = None
 CONFIG_PATH = '{}/DevlabConfig.yaml'.format(PROJ_ROOT)
 WIZARD_CONFIG = {}
+MIN_DEVLAB_VERSION = '2.3.0'
 
 ##-- Classes --##
 class NetInfo:
@@ -196,6 +197,22 @@ class NetInfo:
         return (ipaddr & mask) == (netaddr & mask)
 
 ##-- Functions --##
+def check_min_devlab_version():
+    proc = subprocess.Popen(['devlab --version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
+        print("ERROR: Could devlab exited non-zero while checking its version: ")
+        print(stderr)
+        sys.exit(1)
+    version = stdout.split()[1]
+    if isinstance(version, bytes):
+        version = version.decode()
+    if version == 'master':
+        print("## From Wizard:")
+        print("## WARNING!!! Devlab version is set to 'master'. You may have to update from your devlab repository depending on which commit you're at")
+        print("## Continuing anyway...")
+        return
+
 def get_selection_menu(options, enabled_options=None, title=None, loop_title=None, show_all=False, show_done=False):
     enabled_opts = []
     if enabled_options:
@@ -329,6 +346,25 @@ def get_values_menu(options, inplace=False, title='Enter the values you want to 
             working_options[key] = new_val
     return working_options
 
+def mkdirs(path):
+    """This is like mkdir -p"""
+    if os.path.isdir(path):
+        return True
+    try:
+        if not os.path.isdir(path):
+            os.makedirs(path)
+        return True
+    except FileExistsError as e:
+        if os.access(path, os.W_OK):
+            return True
+        print("Path {}: exists but is unwritable".format(path))
+        return False
+    except OSError as e:
+        if e.errno == 17: #This is fileexists
+            return True
+        print("Mkdir failed on: '{}'. Got error: {}".format(path, e.strerror))
+        return False
+
 def write_config(config):
     print("Writing DevlabConfig.yaml")
     with open(CONFIG_PATH, 'w') as cfile:
@@ -342,6 +378,7 @@ def write_config(config):
 
 def write_wizard_config(config):
     cfile_path = '{}/{}/wizard.yaml'.format(PROJ_ROOT, CONFIG['paths']['component_persistence'])
+    mkdirs(os.path.dirname(cfile_path))
     print("Writing {}".format(cfile_path))
     with open(cfile_path, 'w') as cfile:
         cfile.write(
@@ -356,6 +393,7 @@ def write_wizard_config(config):
 if __name__ == '__main__':
     os.chdir(PROJ_ROOT)
     CONFIG_LOAD_FROM = CONFIG_PATH
+    check_min_devlab_version()
     NEW_CONFIG = False
     if not os.path.isfile(CONFIG_PATH) or os.path.getsize(CONFIG_PATH) == 0:
         CONFIG_LOAD_FROM = '{}/defaults/DevlabConfig.yaml'.format(PROJ_ROOT)
@@ -369,6 +407,7 @@ if __name__ == '__main__':
     with open(CONFIG_LOAD_FROM) as DCF:
         CONFIG = yaml.load(DCF, Loader=yaml.SafeLoader)
     ORG_CONFIG_JSON = json.dumps(CONFIG)
+    CONFIG['min_devlab_version'] = MIN_DEVLAB_VERSION
 
     #Load wizard's config if it exists:
     if os.path.isfile('{}/{}/wizard.yaml'.format(PROJ_ROOT, CONFIG['paths']['component_persistence'])):
