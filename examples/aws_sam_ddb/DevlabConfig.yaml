@@ -6,7 +6,7 @@ network:
   cidr: 172.30.255.48/28
 domain: dev.lab
 project_filter: lab.dev.aws.sam.example.type=devlab
-wizard_enabled: false
+wizard_enabled: true
 components:
   dynamodb:
     image: 'amazon/dynamodb-local:latest'
