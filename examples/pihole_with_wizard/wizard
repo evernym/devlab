@@ -1,0 +1,465 @@
+#!/usr/bin/env python
+
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+
+#This should be backwards and forwards compatible with python2 or 3
+try:
+    #Python2
+    text_input = raw_input #pylint: disable=invalid-name
+    try:
+        from pathlib2 import Path
+    except ImportError:
+        class Path(object):
+            @staticmethod
+            def home(self=None):
+                return os.path.expanduser('~')
+except NameError:
+    #Python3
+    text_input = input #pylint: disable=invalid-name
+    from pathlib import Path
+
+try:
+    import yaml
+    YAML_SUPPORT = True
+except ImportError:
+    YAML_SUPPORT = False
+
+PROJ_ROOT = os.path.dirname(os.path.realpath(__file__))
+CONFIG = None
+CONFIG_PATH = '{}/DevlabConfig.yaml'.format(PROJ_ROOT)
+WIZARD_CONFIG = {}
+
+##-- Classes --##
+class NetInfo:
+    def __init__(self):
+        data = self._run_cmd(
+            "/usr/sbin/ip",
+            [
+                '-json',
+                'addr'
+            ],
+            split=False
+        )
+        if data[0] > 0:
+            raise Exception("Error: {}".format(data[1]))
+        self.net_data = yaml.safe_load(data[1])
+    def _run_cmd(self, path, args=[], split=True, suppress_error_out=False):
+        p = path
+        if isinstance(path,(list,tuple,set)):
+            in_path = False
+            for p in path:
+                if os.access(p, os.X_OK):
+                    in_path = True
+                    break
+            if not in_path:
+                if not suppress_error_out:
+                    print("Error! Can't find executable here: {}".format(path))
+                    return (-1,"Error! Can't find executable here: {}".format(path))
+        else:
+            if not os.access(p,os.X_OK):
+                if not suppress_error_out:
+                    print("Error! Can't find executable here: {}".format(p))
+                return (-1,"Error! Can't find executable here: {}".format(p))
+        pr = subprocess.Popen([p] + args,shell=False,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        pr_out,stderr = pr.communicate()
+        if pr.returncode > 0:
+            if not suppress_error_out:
+                print("Error! running {} {}:".format(p,' '.join(args)))
+                print(stderr)
+            out = stderr.decode('ascii','ignore')
+        else:
+            out = pr_out.decode('ascii','ignore')
+        if split:
+            out = out.splitlines()
+        return (pr.returncode,out)
+    def get_ifaces(self):
+        """Return a list of interface names"""
+        ifaces = []
+        for item in self.net_data:
+            for addr_info in item['addr_info']:
+                if addr_info['family'] == 'inet':
+                    ifaces.append(addr_info['label'])
+        return ifaces
+    def get_iface_of_default_gateway(self):
+        gw = self.get_default_gateway_linux()
+        data = self._run_cmd(
+            "/usr/sbin/ip",
+            [
+                '-json',
+                'route',
+                'get',
+                gw
+            ],
+            split=False
+        )
+        if data[0] > 0:
+            raise Exception("Error: {}".format(data[1]))
+        route_data = yaml.safe_load(data[1])
+        return route_data[0]['dev']
+    def get_iface_of_ip(self, ip):
+        """Get the interface with the given ip"""
+        iface = None
+        for item in self.net_data:
+            for addr_info in item['addr_info']:
+                if addr_info['family'] == 'inet':
+                    if addr_info['local'] == ip:
+                        iface = addr_info['label']
+                        break
+            if iface:
+                break
+        return iface
+    def get_ip_of_iface(self, iface):
+        ip = None
+        for item in self.net_data:
+            for addr_info in item['addr_info']:
+                if addr_info['family'] == 'inet':
+                    if addr_info['label'] == iface:
+                        ip = addr_info['local']
+        return ip
+    def get_subnet_of_iface(self, iface):
+        """Get the subnet in cidr form of the given iface"""
+        prefix = None
+        subnet = None
+        for item in self.net_data:
+            for addr_info in item['addr_info']:
+                if addr_info['family'] == 'inet':
+                    if addr_info['label'] == iface:
+                        prefix = addr_info['prefixlen']
+                        ip = addr_info['local']
+                        break
+            if prefix:
+                break
+        if prefix:
+            #Convert ip to a 32bit integer form
+            nip = struct.unpack('>L',socket.inet_aton(ip))[0]
+            #Create bit mask
+            mask = (0xffffffff << (32 - int(24))) & 0xffffffff
+            #Apply mask, to get network addr
+            nnet = nip & mask
+            #Convert net from 32bit integer to dotted quad
+            net = socket.inet_ntoa(struct.pack('>L', nnet))
+            subnet = '{}/{}'.format(net, prefix)
+        return subnet
+    def get_primary_ip(self):
+        """
+        Gets the IP address of whichever interface has a default route
+    
+        Based on: https://stackoverflow.com/a/28950776
+        """
+        broadcast_nets = (
+            '10.255.255.255',
+            '172.31.255.255',
+            '192.168.255.255',
+            '172.30.255.1'      #This would be the hosts ip for our docker network
+        )
+        ip = '127.0.0.1'
+        for bnet in broadcast_nets:
+            skt = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # Doesn't have to be directly reachable
+                skt.connect((bnet, 1))
+                ip = skt.getsockname()[0]
+                break
+            except: #pylint: disable=bare-except
+                pass
+            finally:
+                skt.close()
+        return ip
+    def get_default_gateway_linux(self):
+        """
+        Read the default gateway directly from /proc.
+    
+        From: https://stackoverflow.com/a/6556951
+        """
+        with open("/proc/net/route") as fh:
+            for line in fh:
+                fields = line.strip().split()
+                if fields[1] != '00000000' or not int(fields[3], 16) & 2:
+                    # If not default route or not RTF_GATEWAY, skip it
+                    continue
+                return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    def ip_in_network(self, ip, cidr):
+        """
+        Check if an ip is in the cidr network. Return bool
+
+        From: https://stackoverflow.com/a/4464961
+        """
+        ipaddr = int(''.join([ '%02x' % int(x) for x in ip.split('.') ]), 16)
+        netstr, bits = cidr.split('/')
+        netaddr = int(''.join([ '%02x' % int(x) for x in netstr.split('.') ]), 16)
+        mask = (0xffffffff << (32 - int(bits))) & 0xffffffff
+        return (ipaddr & mask) == (netaddr & mask)
+
+##-- Functions --##
+def get_selection_menu(options, enabled_options=None, title=None, loop_title=None, show_all=False, show_done=False):
+    enabled_opts = []
+    if enabled_options:
+        enabled_opts = list(enabled_opts)
+    if title:
+        print(title)
+    if show_done:
+        print("NOTE: enabled = *")
+    while True:
+        for idx, opt in enumerate(options, start=1):
+            pre_str = ''
+            if show_done:
+                pre_str = '[ ]'
+                if opt in enabled_opts:
+                    pre_str = '[*]'
+            print("  {idx} - {pre_str}{opt}".format(idx=idx, pre_str=pre_str, opt=opt))
+        options_len = len(options)
+        extra_opts = 0
+        if show_all:
+            extra_opts += 1
+            all_opt = options_len + extra_opts
+            print("  {opt} - ALL".format(opt=all_opt))
+        if show_done:
+            extra_opts += 1
+            done_opt = options_len + extra_opts
+            print("  {opt} - Done".format(opt=done_opt))
+        selection = text_input("Selection: ").strip()
+        try:
+            sel_idx = int(selection)
+        except ValueError:
+            print("Incorrect option: '{}' . Must be an Integer".format(selection))
+            continue
+        if show_done:
+            if sel_idx == done_opt:
+                break
+        if show_all:
+            if sel_idx == all_opt:
+                for idx, opt in enumerate(options, start=0):
+                    if opt in enabled_opts:
+                        enabled_opts.remove(opt)
+                        continue
+                    enabled_opts.append(opt)
+                if not show_done:
+                    break
+                if loop_title:
+                    print(loop_title)
+                continue
+        if sel_idx < 1 or sel_idx > options_len + extra_opts:
+            print("\nIncorrect option: {selection}. Must be a number from 1 to {max_idx}".format(selection=selection, max_idx=options_len + extra_opts))
+            continue
+        option_val = options[sel_idx-1]
+        if option_val not in enabled_opts:
+            enabled_opts.append(option_val)
+        else:
+            if show_done:
+                enabled_opts.remove(option_val)
+        if not show_done:
+            break
+    return enabled_opts
+
+def get_user_input(prompt='Enter a value (default={default})', allow_empty=False, default=None, yesno=False):
+    prompt = '{}: '.format(prompt)
+    while True:
+        resp = text_input(prompt.format(default=default))
+        if not resp:
+            if default:
+                resp = default
+        if yesno:
+            if resp.lower() in ('yes','y'):
+                return True
+            elif resp.lower() in ('no', 'n'):
+                return False
+            else:
+                print("Invalid response, must be one of 'yes, y, no, n'")
+                continue
+        if allow_empty:
+            return resp
+        else:
+            if not resp:
+                print("You must provide an answer")
+                continue
+            else:
+                return resp
+
+def get_valid_int(minimum=0, maximum=-1, default=None, prompt="Enter Integer (default={default})", error_prompt='Incorrect integer inputed: \'{int_input}\'. Must be an Integer between {minimum} and {maximum}'):
+    prompt = '{}: '.format(prompt)
+    while True:
+        int_input = text_input(prompt.format(default=default))
+        if int_input == '':
+            if default != None:
+                int_input = default
+        try:
+            int_input = int(int_input)
+            if maximum < 0:
+                if int_input < minimum:
+                    raise ValueError
+            else:
+                if int_input < minimum or int_input > maximum:
+                    raise ValueError
+        except ValueError:
+            max_str = maximum
+            if maximum < 0:
+                max_str = 'inf'
+            print(error_prompt.format(int_input=int_input, minimum=minimum, maximum=max_str))
+            continue
+        break
+    return int_input
+
+def get_values_menu(options, inplace=False, title='Enter the values you want to change', end_string="All Done"):
+    if not inplace:
+        working_options = dict(options)
+    else:
+        working_options = options
+    selection = [None]
+    while selection[0] != end_string:
+        opts = []
+        opts_index = {}
+        #This is to be able to support keys with ':' in them
+        for opt_key, opt_val in working_options.items():
+            opt_str = '{}: {}'.format(opt_key, opt_val)
+            opts.append(opt_str)
+            opts_index[opt_str] = opt_key
+        opts.sort()
+        opts.append(end_string)
+        selection = get_selection_menu(opts, title=title)
+        if selection[0] != end_string:
+            key = opts_index[selection[0]]
+            new_val = text_input('Enter a value for \'{}\': '.format(key))
+            if not new_val:
+                new_val = None
+            working_options[key] = new_val
+    return working_options
+
+def write_config(config):
+    print("Writing DevlabConfig.yaml")
+    with open(CONFIG_PATH, 'w') as cfile:
+        cfile.write(
+            yaml.dump(
+                config,
+                explicit_start=True,
+                default_flow_style=False
+            )
+        )
+
+def write_wizard_config(config):
+    cfile_path = '{}/{}/wizard.yaml'.format(PROJ_ROOT, CONFIG['paths']['component_persistence'])
+    print("Writing {}".format(cfile_path))
+    with open(cfile_path, 'w') as cfile:
+        cfile.write(
+            yaml.dump(
+                config,
+                explicit_start=True,
+                default_flow_style=False
+            )
+        )
+
+##-- Main -##
+if __name__ == '__main__':
+    os.chdir(PROJ_ROOT)
+    CONFIG_LOAD_FROM = CONFIG_PATH
+    NEW_CONFIG = False
+    if not os.path.isfile(CONFIG_PATH) or os.path.getsize(CONFIG_PATH) == 0:
+        CONFIG_LOAD_FROM = '{}/defaults/DevlabConfig.yaml'.format(PROJ_ROOT)
+        NEW_CONFIG = True
+
+    if not YAML_SUPPORT:
+        print("ERROR: This project is using the yaml format for the DevlabConfig file, please install the yaml python module with 'apy install python3-yaml' or its equivalent")
+        sys.exit(1)
+
+    #Load devlab config
+    with open(CONFIG_LOAD_FROM) as DCF:
+        CONFIG = yaml.load(DCF, Loader=yaml.SafeLoader)
+    ORG_CONFIG_JSON = json.dumps(CONFIG)
+
+    #Load wizard's config if it exists:
+    if os.path.isfile('{}/{}/wizard.yaml'.format(PROJ_ROOT, CONFIG['paths']['component_persistence'])):
+        with open('{}/{}/wizard.yaml'.format(PROJ_ROOT, CONFIG['paths']['component_persistence'])) as WCF:
+            WIZARD_CONFIG = yaml.load(WCF, Loader=yaml.SafeLoader)
+    ORG_WIZARD_CONFIG_JSON = json.dumps(WIZARD_CONFIG)
+
+
+    #Prompt/fill in needed values
+    NET_MODE = WIZARD_CONFIG.get('NET_MODE', None)
+    if not NET_MODE:
+        NET_MODE = get_selection_menu(['ipvlan: Container is on your system\'s local network with its own IP', 'default_bridge: Port mapping on default bridge network', 'custom_bridge: Port mapping on custom bridge network'])[0].split(':')[0]
+        WIZARD_CONFIG['NET_MODE'] = NET_MODE #This saves the choice that was made, so that the script can be more idempotent
+    CONT_EXT_IP = WIZARD_CONFIG.get('CONT_EXT_IP', None)
+
+    #Load up an instance of NetInfo to help with some networking helpers
+    NETINFO = NetInfo()
+
+    #See if NET_MODE 
+    if NET_MODE == 'ipvlan':
+        if not CONFIG['network'].get('driver_opts', None):
+            CONFIG['network']['driver_opts'] = dict()
+        if not CONFIG['network']['driver_opts'].get('parent', None):
+            NET_DEV = get_selection_menu(NETINFO.get_ifaces(), title="Setup Wizard: Enter the network interface of you local system LAN network. Best guess is: {}".format(NETINFO.get_iface_of_default_gateway()))[0]
+        else:
+            NET_DEV = CONFIG['network']['driver_opts']['parent']
+        CONFIG['network']['driver_opts']['parent'] = NET_DEV
+        if not CONFIG.get('network', None):
+            CONFIG['network'] = {
+                'driver_opts': dict()
+            }
+        CONFIG['network']['driver'] = 'ipvlan'
+        if not CONFIG['network'].get('subnet', None):
+            CONFIG['network']['subnet'] = get_user_input("Setup Wizard: Enter your system's network subnet. Default: {default}", default=NETINFO.get_subnet_of_iface(NET_DEV), allow_empty=False)
+        if not CONFIG['network'].get('gateway', None):
+            CONFIG['network']['gateway'] = get_user_input("Setup Wizard: Enter your system's default gateway. Default: {default}", default=NETINFO.get_default_gateway_linux(), allow_empty=False)
+        IP_IS_SET=False
+        for run_opt in CONFIG['components']['pihole']['run_opts']:
+            if run_opt.startswith('--ip=') or run_opt.startswith('--ip '):
+                if 'TBD' in run_opt:
+                    CONFIG['components']['pihole']['run_opts'].remove(run_opt)
+                    IP_IS_SET=False
+                    break
+                else:
+                    IP_IS_SET=True
+        if not CONT_EXT_IP:
+            while True:
+                CONT_EXT_IP = get_user_input("Setup Wizard: Enter the IP on your network you want to set for PI-Hole. BE CAREFUL you choose an IP that isn't already in use, and not in a range given out by your DHCP server, else you might get IP conflicts on your network!", default='', allow_empty=False)
+                if NETINFO.ip_in_network(CONT_EXT_IP, CONFIG['network']['subnet']):
+                    break
+                print("ERROR: The IP you entered '{}' is NOT in the subnet: '{}' try again".format(CONT_EXT_IP, CONFIG['network']['subnet']))
+            CONFIG['components']['pihole']['run_opts'].append('--ip={}'.format(CONT_EXT_IP))
+    elif 'bridge' in NET_MODE:
+        if NET_MODE == 'default_bridge':
+            if CONFIG.get('network', None):
+                del CONFIG['network']
+        if NET_MODE == 'custom_bridge':
+            CONFIG['network']['name'] = 'pi-hole'
+            CONFIG['network']['driver'] = 'bridge'
+            if 'USE_CUSTOM_BRIDGE_NETWORK' in WIZARD_CONFIG:
+                USE_CUSTOM_BRIDGE_NETWORK = WIZARD_CONFIG.get('USE_CUSTOM_BRIDGE_NETWORK', False)
+            else:
+                USE_CUSTOM_BRIDGE_NETWORK = get_user_input("Setup Wizard: Would you like to set your own subnet for the custom bridge network (y/n)? default={default}", default='n', yesno=True)
+            WIZARD_CONFIG['USE_CUSTOM_BRIDGE_NETWORK'] = USE_CUSTOM_BRIDGE_NETWORK
+            if USE_CUSTOM_BRIDGE_NETWORK and (not CONFIG['network'].get('subnet', None)):
+                CONFIG['network']['subnet'] = get_user_input("Setup Wizard: Enter network subnet", allow_empty=False)
+                WIZARD_CONFIG['USE_CUSTOM_BRIDGE_NETWORK'] = True
+        CONFIG['components']['pihole']['ports'] = list()
+        PORT_80_LOCAL = WIZARD_CONFIG.get('PORT_80_LOCAL', None)
+        if not PORT_80_LOCAL:
+            PORT_80_LOCAL = get_user_input("Setup Wizard: What port would you like your system to forward to the container's port 80? Default: {default}", default='8080', allow_empty=False)
+        WIZARD_CONFIG['PORT_80_LOCAL'] = PORT_80_LOCAL
+        CONFIG['components']['pihole']['ports'] = [
+            '{}:80'.format(PORT_80_LOCAL),
+            '53:53/udp',
+            '53:53/tcp'
+        ]
+        if not CONT_EXT_IP:
+            CONT_EXT_IP = get_user_input("Setup Wizard: Enter the externally visable IP on your network that other computers will use to send requests to pi-hole. Default: {default}", default=NETINFO.get_ip_of_iface(NETINFO.get_iface_of_default_gateway()), allow_empty=False)
+    else:
+        print("ERROR: How'd you even get here? Unknown NET_MODE: '{}'".format(NET_MODE))
+        sys.exit(1)
+    WIZARD_CONFIG['CONT_EXT_IP'] = CONT_EXT_IP
+    for idx, run_opt in enumerate(CONFIG['components']['pihole']['run_opts']):
+        if run_opt.startswith('FTLCONF_LOCAL_IPV4='):
+            if 'TBD' in run_opt:
+                CONFIG['components']['pihole']['run_opts'][idx] = 'FTLCONF_LOCAL_IPV4={}'.format(CONT_EXT_IP)
+                break
+
+    #Save config files
+    if ORG_CONFIG_JSON != json.dumps(CONFIG) or NEW_CONFIG:
+        write_config(CONFIG)
+    if ORG_WIZARD_CONFIG_JSON != json.dumps(WIZARD_CONFIG):
+        write_wizard_config(WIZARD_CONFIG)
