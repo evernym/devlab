@@ -127,22 +127,44 @@ class DockerHelper(object):
         else:
             self.log.error("Cannot find docker_file: %s", docker_file)
         return (1, ['Cannot find docker_file: {}'.format(docker_file)])
-    def create_network(self, name, cidr=None, driver='bridge', device_name=None):
+    def create_network(self, name, cidr=None, gateway=None, ip_range=None, ipv6=False, driver_opts=None, scope=None, subnet=None, device_name=None, driver='bridge'):
         """
         Create a docker network
 
         Args:
             name: str, Name of the network to create
-            cidr: str, CIDR Notation for the network
+            cidr: str, CIDR Notation for the network (Same as subnet arg)
+            gateway: str, for use with network drivers that require the argument
+            ip_range: str, for use with network drivers that require the argument
+            ipv6: bool, whether to enable ipv6 for the network. Default: False
+            driver: str, which docker driver to use. Default: 'bridge'
+            driver_opts: dict, list of key=value pairs to pass with --opt to 
+                the docker network create command.
+            scope: str, for use with network drivers that require the argument
+            subnet: str, CIDR notation for the subnet network (Same argument as cidr)
+            device_name: str, specify the exact name of the bridge device for
+                docker to create
+
+            [NOTE] Almost all of these arguments have 1:1 correlation to
+                arguments for: 'docker network create --help'
         """
         opts = [
             'network',
             'create',
-            '--subnet',
-            cidr,
             '--driver',
             driver
         ]
+        if subnet or cidr:
+            cidr = subnet
+            opts += [ '--subnet', cidr ]
+        if gateway:
+            opts += ['--gateway', gateway]
+        if ip_range:
+            opts += ['--ip-range', ip_range]
+        if ipv6:
+            opts += ['--ipv6=true']
+        if scope:
+            opts += ['--scope', scope]
         if self.labels:
             for label in self.labels:
                 opts += [
@@ -151,6 +173,9 @@ class DockerHelper(object):
                 ]
         if self.filter_label:
             opts.append('--label={}'.format(self.filter_label))
+        if driver_opts:
+            for dkey, dval in driver_opts.items():
+                opts += ['--opt', '{}={}'.format(dkey,dval)]
         if device_name:
             opts.append('--opt')
             opts.append('com.docker.network.bridge.name={}'.format(device_name))

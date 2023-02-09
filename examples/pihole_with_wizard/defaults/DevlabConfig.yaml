@@ -1,0 +1,35 @@
+paths:
+  component_persistence: persistent_data
+  component_persistence_wizard_paths:
+    - wizard.yaml
+network:
+  name: pi-hole
+project_filter: pihole.type=devlab
+wizard_enabled: true
+components:
+  pihole:
+    image: 'pihole/pihole:latest'
+    enabled: true
+    run_opts:
+      - "--dns=127.0.0.1"
+      - "--dns=192.168.251.101"
+      - "--restart=unless-stopped"
+      - "--hostname=pi.hole"
+      - "-e"
+      - "TZ=America/Denver"
+      - "-e"
+      - "VIRTUAL_HOST=pi.hole"
+      - "-e"
+      - "PROXY_LOCATION=pi.hole"
+      - "-e"
+      - "FTLCONF_LOCAL_IPV4=TBD" # This will be filled in by the wizard
+    mounts:
+      - ':/devlab'
+      - 'persistent_data/pihole/etc-pihole:/etc/pihole'
+      - 'persistent_data/pihole/etc-dnsmasq.d:/etc/dnsmasq.d'
+    ordinal:
+      group: 0
+      number: 1
+    reset_paths:
+      - etc-pihole/
+      - etc-dnsmasq.d

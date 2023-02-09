@@ -1,0 +1,8 @@
+#!/bin/bash
+
+if ! which sam 2>&1 ; then
+    echo "ERROR: This project expects aws SAM to be installed somewhere on your local system for the foreground component"
+    echo "See: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html for some instructions"
+    echo "Aborting!"
+    exit 1
+fi

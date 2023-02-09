@@ -185,7 +185,15 @@ The structure looks like this:
 {
     "name": "",
     "device_name": "",
-    "cidr": ""
+    "cidr": "",
+    "gateway": "",
+    "ip_range": "",
+    "ipv6": false,
+    "driver": "",
+    "driver_opts": {
+        "key": "value"
+    },
+    "scope": ""
 }
 ```
 
@@ -196,6 +204,13 @@ All Keys that are in **bold** are required
 | **name** | String | The name of the docker network to use |
 | device_name | String | When creating the network use this name as the network interface on the host |
 | cidr | String | The CIDR notation of the network range to use for the new docker network |
+| gateway | String | For use with network drivers that require or use the --gateway argument |
+| ip_range | String | For use with network drivers that require or use the --ip-range argument |
+| ipv6 | Boolean | Whether to enable ipv6 for the network. Default is `false` |
+| driver | String | Specify which driver to use when creating the docker network. Default is `bridge` |
+| driver_opts | Hash | Key value pairs to pass with --opt to the docker network cread command |
+| scope | String | For use with network drivers that require or use the --scope argument |
+| subnet | String | Alias for `cidr` above |
 
 ***[NOTE]*** All of the above keys are required unless you have pre-created the network.
 
