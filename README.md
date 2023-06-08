@@ -240,6 +240,7 @@ The structure looks like this:
 {
     "tag": ""|[],
     "docker_file": "",
+    "build_context": "",
     "build_opts": [],
     "skip_pull": BOOL,
     "ordinal": {
@@ -253,7 +254,8 @@ All Keys that are in **bold** are required
 | Key | Type  | Value Description |
 | --- |  ---  | ---               |
 | **tag** | String or List of Strings | This is a tag that should be applied to the image. If a list is passed, the first tag becomes a primary identifier. |
-| **docker_file** | String | Path to the docker file, relative to the project's root to use when building the image. ***[NOTE]*** The build context will be the parent directory of the dockerfile's path |
+| **docker_file** | String | Path to the docker file, relative to the project's root to use when building the image. ***[NOTE]*** If `build_context` is NOT set then the build context will be the parent directory of the dockerfile's path |
+| build_context | String | Path (relative to the project) for the docker build command to run. This sets the docker build context, so will affect COPY commands in dockerfiles etc... Remember that this path and all files have to be copied/sent to the docker daemon, so be careful of the size of the directory you set here |
 | build_opts | List of Strings | Additional options to pass to the `docker build` command. Each CLI arg must be it's own element. For example: `[ '--build-arg', 'foo=bar' ]` would become `docker build --build-arg foo=bar PATH...` etc... |
 | skip_pull | Boolean | Whether or not a forced pull does anything. There are cases where an image is built locally used elsewhere, so a pull will fail since it isn't on docker hub. If this is `true`, then even when a build is requesting a `pull` it will skip it for this image |
 | ordinal | Hash | This is used indicate the order of the images to build. When parallel execution is supported, the `group` key indicates the image that can be built at the same time, `number` indicates the order inside the group to start up |

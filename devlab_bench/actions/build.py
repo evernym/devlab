@@ -99,7 +99,10 @@ def action(images='*', clean=False, no_cache=False, pull=False, skip_pull_images
         else:
             image_n_tag = '{}:{}'.format(image, images_dict[image]['tag'])
         image_status = docker_obj_status(image_n_tag, 'image', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
-        image_context = os.path.dirname('{}/{}'.format(devlab_bench.PROJ_ROOT, images_dict[image]['docker_file']))
+        image_context = images_dict[image].get(
+            'build_context',
+            os.path.dirname('{}/{}'.format(devlab_bench.PROJ_ROOT, images_dict[image]['docker_file']))
+        )
         docker_helper_obj = docker_helper
         build_context = devlab_bench.PROJ_ROOT
         if image in base_images_to_build: #Override default build context for built-in images
