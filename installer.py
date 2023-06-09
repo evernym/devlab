@@ -5,7 +5,6 @@ This is a script to help in installing and setting up the devlab executable
 """
 
 import argparse
-import distutils.spawn
 import json
 import logging
 import os
@@ -17,6 +16,11 @@ import subprocess
 import sys
 import tarfile
 from io import BytesIO
+
+try:
+    from shutil import which
+except ImportError:
+    from distutils.spawn import find_executable as which
 
 try:
     #For python3
@@ -146,7 +150,7 @@ def action_install(repo_path, set_version=None, **kwargs):
                 exc_val=exc_value
             )
             log.error(exc_str)
-        if not distutils.spawn.find_executable('python'):
+        if not which('python'):
             log.warning("The executable 'python' is not found in your PATH. Checking for others...")
             for path in os.environ.get('PATH', '/usr/bin:/bin:/usr/local/bin').split(':'):
                 found_files = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f)) and re.match(r'python[0-9\.]*$', f)]
@@ -294,7 +298,7 @@ def find_cur_version():
     os.chdir(
         os.path.expanduser('~')
     )
-    cur_path = distutils.spawn.find_executable('devlab')
+    cur_path = which('devlab')
     log.debug("Path where 'devlab' executable resides: %s", cur_path)
     if cur_path == 'devlab':
         cur_path = None
