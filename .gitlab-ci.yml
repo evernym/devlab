@@ -3,7 +3,7 @@ image: $CI_REGISTRY_IMAGE/devlab-build:latest
 
 .tags:
   tags:
-    - docker
+    - saas-linux-small-amd64
 
 stages:
   - docker-images
@@ -19,7 +19,7 @@ stages:
       - branches
       - merge_requests
   tags:
-    - docker
+    - saas-linux-small-amd64
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
