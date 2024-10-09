@@ -175,13 +175,15 @@ class Command(object):
                             stdout_dangle = self._sanitize_string(self.proc.stdout.read())
                             if stdout_dangle:
                                 if self.log_output:
-                                    self.log.info(stdout_dangle)
+                                    for stdout_dangle_line in stdout_dangle.splitlines():
+                                        self.log.info(stdout_dangle_line)
                                 self.stdout.append(stdout_dangle)
                         if self.proc.stderr:
                             stderr_dangle = self._sanitize_string(self.proc.stderr.read())
                             if stderr_dangle:
                                 if self.log_output:
-                                    self.log.error(stderr_dangle)
+                                    for stderr_dangle_line in stderr_dangle.splitlines():
+                                        self.log.warning(stderr_dangle_line)
                                 self.stderr.append(stderr_dangle)
                         break
             except OSError:
