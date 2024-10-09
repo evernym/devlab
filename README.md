@@ -105,7 +105,8 @@ The configuration file has the following base structure:
     "project_filter": "",
     "reprovisionable_components": [],
     "runtime_images": {},
-    "wizard_enabled": true
+    "wizard_enabled": true,
+    "disable_buildkit": false
 }
 ```
 
@@ -123,6 +124,7 @@ All Keys that are in **bold** are required to be in the config
 | reprovisionable_components | List of Strings | List of component names that need to reprovisioned (contianer stopped, and removed, then started and provisioned again) if the hosts' IP changes) |
 | runtime_images | Hash of Hashes | Defines custom images that components might be using. These images etc.. would provided by, and maintained by the project. First level key is a string of the name of the image. Structure conforms to [Runtime Image Structure](#runtime-image-structure) |
 | wizard_enabled | Boolean | Whether or not to try and execute a wizard if found in the root of the project |
+| disable_buildkit | Boolean | Whether the DOCKER_BUILDKIT env var should be set to `0` when building images |
 
 ## Component Config Structure
 The structure looks like this:

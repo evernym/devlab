@@ -166,7 +166,7 @@ def action(images='*', clean=False, no_cache=False, pull=False, skip_pull_images
         image_args['docker_file'] = image_args['docker_file_full_path']
         del image_args['docker_file_full_path']
         log.debug("image: '%s' context='%s' log_output='%s' other_args='%s'", image, image_context, log_output, image_args)
-        bld_res = docker_helper_obj.build_image(image, context=image_context, log_output=log_output, network=config['network']['name'], logger=logging.getLogger('Build-{}'.format(image)), **image_args)
+        bld_res = docker_helper_obj.build_image(image, context=image_context, log_output=log_output, network=config['network']['name'], disable_build_kit=config['disable_buildkit'], logger=logging.getLogger('Build-{}'.format(image)), **image_args)
         if bld_res[0] != 0:
             log.error("Failed building image: '%s' Aborting...", image)
             abort = True

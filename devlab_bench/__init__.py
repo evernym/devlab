@@ -42,7 +42,8 @@ CONFIG_DEF = {
     },
     'reprovisionable_components': [],
     'runtime_images': {},
-    'paths': {}
+    'paths': {},
+    'disable_buildkit': False
 }
 LOGGING_LEVELS = {
     'debug': logging.DEBUG,
