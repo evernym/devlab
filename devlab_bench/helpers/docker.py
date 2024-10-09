@@ -35,14 +35,25 @@ class DockerHelper(object):
             '/usr/bin/docker',
             '/usr/local/bin/docker',
             '/usr/sbin/docker',
-            '/bin/docker'
+            '/bin/docker',
+            '/opt/podman/bin/podman',
+            '/usr/bin/podman',
+            '/usr/local/bin/podman'
         )
+        self.eng_is = 'unknown'
         self.filter_label = filter_label
         self.common_domain = common_domain
         self.opt_domainname = False
         if not skip_checks:
             self._pre_check()
         self.labels = labels
+        path_check = Command(self.docker_bin_paths)._precheck()
+        if path_check[0] == 0:
+            if 'podman' in path_check[1]:
+                self.eng_is = 'podman'
+            if 'docker' in path_check[1]:
+                self.eng_is = 'docker'
+        self.log.debug("Docker engine type found is: %s", self.eng_is)
     def _pre_check(self):
         """
         Checks to make sure the script is being run as the root user, or a
@@ -60,7 +71,7 @@ class DockerHelper(object):
         dchk = Command(self.docker_bin_paths, ['run', '--help'], logger=self.log, split=False).run()
         if '--domainname' in dchk[1]:
             self.opt_domainname = True
-    def build_image(self, name, tag, context, docker_file, apply_filter_label=True, build_opts=None, logger=None, network=None, **kwargs):
+    def build_image(self, name, tag, context, docker_file, apply_filter_label=True, build_opts=None, disable_buildkit=False, logger=None, network=None, **kwargs):
         """
         Build a docker image.
 
@@ -112,10 +123,11 @@ class DockerHelper(object):
         ]
         if os.path.isfile(docker_file):
             with open(docker_file) as stdin:
-                if 'env' in kwargs:
-                    kwargs['env'].update({'DOCKER_BUILDKIT': "0"})
-                else:
-                    kwargs['env'] = {'DOCKER_BUILDKIT': "0"}
+                if disable_buildkit:
+                    if 'env' in kwargs:
+                        kwargs['env'].update({'DOCKER_BUILDKIT': "0"})
+                    else:
+                        kwargs['env'] = {'DOCKER_BUILDKIT': "0"}
                 cmd_ret = Command(
                     self.docker_bin_paths,
                     opts,
@@ -287,6 +299,10 @@ class DockerHelper(object):
         opts = [
             'images'
         ]
+        podman_specific_prepends = [
+            'localhost/', # These are podman local images
+            'docker.io/library/' # These are docker.io hosted images
+        ]
         if self.filter_label and not return_all:
             opts.append('--filter')
             opts.append('label={}'.format(self.filter_label))
@@ -297,6 +313,21 @@ class DockerHelper(object):
             opts,
             logger=self.log
         ).run()
+        if self.eng_is == 'podman':
+            if cmd_ret[0] == 0:
+                self.log.debug('Normalizing podman specific image output to match docker\'s format')
+                new_list = []
+                for cline in cmd_ret[1]:
+                    modified = False
+                    for pman_prep in podman_specific_prepends:
+                        if cline.startswith(pman_prep):
+                            new_name = cline[len(pman_prep):]
+                            new_list.append(new_name)
+                            self.log.debug("Normalized container image: '%s' -> '%s'", cline, new_name)
+                            modified = True
+                    if not modified:
+                        new_list.append(cline)
+                cmd_ret = (cmd_ret[0], new_list)
         return cmd_ret
     def get_networks(self, return_all=False):
         """
