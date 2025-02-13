@@ -82,8 +82,9 @@ def action(components='*', skip_provision=False, bind_to_host=False, keep_up_on_
     if config['network']['name']:
         network_status = docker_obj_status(config['network']['name'], 'network', devlab_bench.helpers.docker.DOCKER, logger=log)[0]
         if network_status['exists'] and not network_status['owned']:
-            log.error("Conflicting custom network found! There is already a docker network defined with this name, but is not owned by this project")
-            sys.exit(1)
+            if config['network']['name'] != 'host': #This is to allow a project to use the 'host' network
+                log.error("Conflicting custom network found! There is already a docker network defined with this name, but is not owned by this project")
+                sys.exit(1)
         if not network_status['exists']:
             log.info("Custom user network: '%s' not found. Creating", config['network']['name'])
             devlab_bench.helpers.docker.DOCKER.create_network(**config['network'])
