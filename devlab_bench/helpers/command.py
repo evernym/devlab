@@ -238,13 +238,16 @@ class Command(object):
         if self.env:
             subprocess_args['env'] = dict(os.environ)
             subprocess_args['env'].update(self.env)
-        cmd_str = ' '.join([self.real_path] + [quote(script_arg) for script_arg in self.args])
+        # Convert all args to str
+        strd_args = [str(script_arg) for script_arg in self.args]
+        # Quote them if use_shell is true
+        cmd_str = ' '.join([self.real_path] + [quote(script_arg) for script_arg in strd_args])
         self.log.debug("Running command: '%s'", cmd_str)
         self.ctime = time.time()
         if self.use_shell:
             self.proc = subprocess.Popen(cmd_str, **subprocess_args)
         else:
-            self.proc = subprocess.Popen([self.real_path] + self.args, **subprocess_args)
+            self.proc = subprocess.Popen([self.real_path] + strd_args, **subprocess_args)
         for strm in (self.proc.stdout, self.proc.stderr):
             if strm is not None:
                 fno = strm.fileno()

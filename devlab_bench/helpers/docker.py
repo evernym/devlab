@@ -139,7 +139,7 @@ class DockerHelper(object):
         else:
             self.log.error("Cannot find docker_file: %s", docker_file)
         return (1, ['Cannot find docker_file: {}'.format(docker_file)])
-    def create_network(self, name, cidr=None, gateway=None, ip_range=None, ipv6=False, driver_opts=None, scope=None, subnet=None, device_name=None, driver='bridge'):
+    def create_network(self, name, cidr=None, gateway=None, ip_range=None, ipv6=False, driver_opts=None, subnet=None, device_name=None, driver='bridge'):
         """
         Create a docker network
 
@@ -152,7 +152,6 @@ class DockerHelper(object):
             driver: str, which docker driver to use. Default: 'bridge'
             driver_opts: dict, list of key=value pairs to pass with --opt to 
                 the docker network create command.
-            scope: str, for use with network drivers that require the argument
             subnet: str, CIDR notation for the subnet network (Same argument as cidr)
             device_name: str, specify the exact name of the bridge device for
                 docker to create
@@ -175,8 +174,6 @@ class DockerHelper(object):
             opts += ['--ip-range', ip_range]
         if ipv6:
             opts += ['--ipv6=true']
-        if scope:
-            opts += ['--scope', scope]
         if self.labels:
             for label in self.labels:
                 opts += [
@@ -351,7 +348,7 @@ class DockerHelper(object):
             opts.append('--filter')
             opts.append('label={}'.format(self.filter_label))
         opts.append('--format')
-        opts.append('{{.ID}},{{.Name}},{{.Driver}},{{.Scope}}')
+        opts.append('{{.ID}},{{.Name}},{{.Driver}}')
         cmd_ret = Command(
             self.docker_bin_paths,
             opts,
@@ -360,12 +357,11 @@ class DockerHelper(object):
         networks = []
         if cmd_ret[0] == 0:
             for nres in cmd_ret[1]:
-                network_id, name, driver, scope = nres.split(',')
+                network_id, name, driver = nres.split(',')
                 networks.append({
                     'id': network_id,
                     'name': name,
                     'driver': driver,
-                    'scope': scope
                 })
             return (cmd_ret[0], networks)
         return cmd_ret
